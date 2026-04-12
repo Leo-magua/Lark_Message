@@ -1,0 +1,5 @@
+node_modules/
+dist/
+data/lark.db
+data/lark.db-wal
+data/lark.db-shm
