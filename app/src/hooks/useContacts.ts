@@ -10,6 +10,7 @@ export interface UseContactsReturn {
   searchResults: Person[];
   searchLoading: boolean;
   searchLark: (q: string, type: 'person' | 'group') => Promise<void>;
+  clearSearch: () => void;
   addContact: (contact: {
     id: string;
     name: string;
@@ -18,7 +19,13 @@ export interface UseContactsReturn {
     contact_type: 'person' | 'group';
   }) => Promise<void>;
   removeContact: (id: string) => Promise<void>;
-  patchContact: (id: string, data: Partial<Pick<Person, 'tags' | 'knows' | 'lastTalk' | 'talkCount' | 'autoReply' | 'syncMode' | 'syncLimit'>>) => Promise<void>;
+  patchContact: (
+    id: string,
+    data: Partial<Pick<Person, 'tags' | 'knows' | 'lastTalk' | 'talkCount' | 'autoReply' | 'intro'>> & {
+      syncMode?: Person['syncMode'] | null;
+      syncLimit?: number | null;
+    }
+  ) => Promise<void>;
   refresh: () => Promise<void>;
 }
 
@@ -45,11 +52,22 @@ export function useContacts(): UseContactsReturn {
     loadContacts();
   }, [loadContacts]);
 
+  const clearSearch = useCallback(() => {
+    setSearchLoading(false);
+    setSearchResults([]);
+  }, []);
+
   const searchLark = useCallback(async (q: string, type: 'person' | 'group') => {
+    const trimmed = q.trim();
+    if (!trimmed) {
+      clearSearch();
+      return;
+    }
+
     setSearchLoading(true);
     setSearchResults([]);
     try {
-      const data = await api.contacts.search(q, type);
+      const data = await api.contacts.search(trimmed, type);
       setSearchResults(data.contacts);
     } catch (err) {
       console.error('[useContacts] search error:', err);
@@ -57,7 +75,7 @@ export function useContacts(): UseContactsReturn {
     } finally {
       setSearchLoading(false);
     }
-  }, []);
+  }, [clearSearch]);
 
   const addContact = useCallback(async (contact: {
     id: string;
@@ -77,7 +95,13 @@ export function useContacts(): UseContactsReturn {
     setContacts(prev => prev.filter(c => c.id !== id));
   }, []);
 
-  const patchContact = useCallback(async (id: string, data: Partial<Pick<Person, 'tags' | 'knows' | 'lastTalk' | 'talkCount' | 'autoReply' | 'syncMode' | 'syncLimit'>>) => {
+  const patchContact = useCallback(async (
+    id: string,
+    data: Partial<Pick<Person, 'tags' | 'knows' | 'lastTalk' | 'talkCount' | 'autoReply' | 'intro'>> & {
+      syncMode?: Person['syncMode'] | null;
+      syncLimit?: number | null;
+    }
+  ) => {
     await api.contacts.patch(id, data);
     // Optimistic update
     setContacts(prev => prev.map(c =>
@@ -91,6 +115,7 @@ export function useContacts(): UseContactsReturn {
     searchResults,
     searchLoading,
     searchLark,
+    clearSearch,
     addContact,
     removeContact,
     patchContact,

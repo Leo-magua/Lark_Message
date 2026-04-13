@@ -10,8 +10,11 @@ export interface Person {
   lastTalk: string;
   talkCount: number;
   autoReply: boolean;
-  syncMode?: 'latest' | 'full';
-  syncLimit?: number;
+  /** null = 使用设置页全局默认 */
+  syncMode?: 'latest' | 'full' | null;
+  syncLimit?: number | null;
+  /** 用户简介（可手动编辑或由 AI 根据聊天记录生成） */
+  intro?: string;
 }
 
 export interface Channel {
@@ -25,8 +28,8 @@ export interface Channel {
   hasAlert: boolean;
   summary: string;
   autoReply: boolean;
-  syncMode?: 'latest' | 'full';
-  syncLimit?: number;
+  syncMode?: 'latest' | 'full' | null;
+  syncLimit?: number | null;
 }
 
 /** Auto-reply channel enriched with config */
@@ -83,9 +86,24 @@ export interface TimelineEvent {
   id: string;
   title: string;
   summary: string;
+  /** AI 提取：主要发言者及观点/原话要点 */
+  speaker_highlights?: string;
   /** list of topic_id strings */
   topics: string[];
   occurred_at: string;
+  source_contact_id?: string;
+  source_chat_id?: string;
+}
+
+/** 事件管理表 / API 全量字段（含是否从时间轴隐藏） */
+export interface ManagedEvent {
+  id: string;
+  title: string;
+  summary: string;
+  speaker_highlights?: string;
+  topics: string[];
+  occurred_at: string;
+  timeline_hidden: boolean;
   source_contact_id?: string;
   source_chat_id?: string;
 }
@@ -94,8 +112,17 @@ export interface Settings {
   openaiKey: string;
   openaiUrl: string;
   kimiCommand: string;
-  autoReplyEnabled: boolean;
   modelId: string;
+  /** 后台定时同步通讯录中全部对象的消息 */
+  messageSyncPollingEnabled: boolean;
+  /** 同步间隔（秒），后端限制 30～7200 */
+  messageSyncIntervalSec: number;
+  /** Default sync mode for contacts without per-card overrides */
+  defaultSyncMode: 'latest' | 'full';
+  /** How many latest messages to fetch when mode=latest (per contact/group) */
+  defaultSyncLimit: number;
+  /** Hard cap for mode=full (still paginates until cap or no more pages) */
+  fullSyncCap: number;
 }
 
 export const topicColors = [
@@ -123,4 +150,13 @@ export interface ContactSummary {
   contact_type: string;
   messages: ContactMessage[];
   last_message_at: string;
+}
+
+/** 通讯录详情中展示的、与该对象关联的 AI 事件（按 occurred_at 新→旧） */
+export interface ContactLinkedEvent {
+  id: string;
+  title: string;
+  summary: string;
+  speaker_highlights?: string;
+  occurred_at: string;
 }

@@ -1,4 +1,4 @@
-import { useState, useEffect, type Dispatch, type SetStateAction } from 'react';
+import { useState, useEffect, useCallback, type Dispatch, type SetStateAction } from 'react';
 import {
   Bot,
   Clock,
@@ -24,16 +24,33 @@ import {
   Loader2,
   ToggleLeft,
   ToggleRight,
+  Table2,
+  Pencil,
+  Trash2,
+  Timer,
 } from 'lucide-react';
 import { topicColors } from '@/types';
-import type { Person, AutoReplyChannel, Template } from '@/types';
+import type { Person, AutoReplyChannel, Template, ManagedEvent, Topic, ContactLinkedEvent } from '@/types';
 import { useContacts } from '@/hooks/useContacts';
 import { useChats } from '@/hooks/useChats';
 import { useSettings } from '@/hooks/useSettings';
 import { useTimeline } from '@/hooks/useTimeline';
 import { api } from '@/lib/api';
 
-type Tab = 'status' | 'timeline' | 'contacts' | 'settings';
+type Tab = 'status' | 'timeline' | 'events' | 'contacts' | 'settings';
+
+function toDatetimeLocalValue(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function fromDatetimeLocalValue(local: string): string {
+  const d = new Date(local);
+  if (Number.isNaN(d.getTime())) return new Date().toISOString();
+  return d.toISOString();
+}
 
 function formatEventTime(isoStr: string): string {
   if (!isoStr) return '';
@@ -60,6 +77,8 @@ function App() {
     addTopic: addTopicApi, deleteTopic, toggleTopicVisibility,
     syncStatus: msgSyncStatus, syncInfo: msgSyncInfo, syncMessages,
     analyzeAll, aiStatus, aiInfo,
+    refresh: refreshTimeline,
+    hideEventFromTimeline,
   } = useTimeline();
 
   // Contacts — real data from Feishu via backend
@@ -69,6 +88,7 @@ function App() {
     searchResults,
     searchLoading,
     searchLark,
+    clearSearch,
     addContact,
     removeContact,
     patchContact,
@@ -449,7 +469,7 @@ function App() {
               {aiStatus === 'analyzing' ? 'AI分析中...' : 'AI分析'}
             </button>
             <button
-              onClick={() => syncMessages()}
+              onClick={() => syncMessages({ fullSyncCap: settings.fullSyncCap })}
               disabled={msgSyncStatus === 'syncing'}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-sm rounded-full hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
@@ -495,10 +515,18 @@ function App() {
           {topics.map((topic) => {
             const colors = topicColors[parseInt(topic.color)] ?? topicColors[0];
             return (
-              <button
+              <div
                 key={topic.id}
+                role="button"
+                tabIndex={0}
                 onClick={() => toggleTopicVisibility(topic.id)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    toggleTopicVisibility(topic.id);
+                  }
+                }}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all cursor-pointer select-none ${
                   topic.visible
                     ? `${colors.bg} ${colors.text}`
                     : 'bg-neutral-100 text-neutral-400'
@@ -510,15 +538,17 @@ function App() {
                   ({_events.filter(e => e.topics.includes(topic.topic_id)).length})
                 </span>
                 <button
+                  type="button"
                   onClick={(e) => {
                     e.stopPropagation();
                     deleteTopic(topic.id);
                   }}
                   className="ml-1 p-0.5 hover:bg-black/10 rounded transition-colors"
+                  aria-label={`删除主题 ${topic.name}`}
                 >
                   <X className="w-3 h-3" />
                 </button>
-              </button>
+              </div>
             );
           })}
         </div>
@@ -546,7 +576,15 @@ function App() {
                   <div className={`relative z-10 w-3 h-3 rounded-full ${colors.dot} flex-shrink-0 mt-0.5`} />
 
                   {/* Content */}
-                  <div className={`flex-1 p-3 rounded-xl ${colors.bg} border ${colors.border}`}>
+                  <div className={`relative flex-1 p-3 pr-9 rounded-xl ${colors.bg} border ${colors.border}`}>
+                    <button
+                      type="button"
+                      onClick={() => void hideEventFromTimeline(event.id)}
+                      className="absolute top-2 right-2 p-1 rounded-lg text-neutral-400 hover:text-neutral-700 hover:bg-white/60 transition-colors"
+                      title="从时间轴移除此条（数据仍在「事件」页，可恢复显示）"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
                     <div className="flex items-center gap-2 mb-1 flex-wrap">
                       <span className={`text-xs font-semibold ${colors.text}`}>{event.title}</span>
                       {/* Topic tags */}
@@ -562,6 +600,12 @@ function App() {
                       })}
                     </div>
                     <p className="text-sm text-neutral-700">{event.summary}</p>
+                    {event.speaker_highlights?.trim() ? (
+                      <p className="text-xs text-neutral-500 mt-1.5 leading-relaxed">
+                        <span className="font-medium text-neutral-600">发言要点：</span>
+                        {event.speaker_highlights}
+                      </p>
+                    ) : null}
                   </div>
                 </div>
               );
@@ -576,6 +620,407 @@ function App() {
             </div>
           )}
         </div>
+      </div>
+    );
+  };
+
+  // ============ Events admin (full CRUD; timeline 「X」只写 timeline_hidden) ============
+  const EventsPage = () => {
+    const [rows, setRows] = useState<ManagedEvent[]>([]);
+    const [topicOptions, setTopicOptions] = useState<Topic[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [selected, setSelected] = useState<Set<string>>(new Set());
+    const [busy, setBusy] = useState(false);
+    const [editorOpen, setEditorOpen] = useState(false);
+    const [editingId, setEditingId] = useState<string | null>(null);
+    const [formTitle, setFormTitle] = useState('');
+    const [formSummary, setFormSummary] = useState('');
+    const [formSpeakerHighlights, setFormSpeakerHighlights] = useState('');
+    const [formOccurred, setFormOccurred] = useState('');
+    const [formShowOnTimeline, setFormShowOnTimeline] = useState(true);
+    const [formTopicIds, setFormTopicIds] = useState<Set<string>>(new Set());
+
+    const loadRows = useCallback(async () => {
+      setLoading(true);
+      try {
+        const [ev, tp] = await Promise.all([
+          api.events.list({ limit: 1500 }),
+          api.topics.list(),
+        ]);
+        setRows(ev.events);
+        setTopicOptions(tp);
+      } catch {
+        setRows([]);
+      } finally {
+        setLoading(false);
+      }
+    }, []);
+
+    useEffect(() => {
+      void loadRows();
+    }, [loadRows]);
+
+    const openCreate = () => {
+      setEditingId(null);
+      setFormTitle('');
+      setFormSummary('');
+      setFormSpeakerHighlights('');
+      setFormOccurred(toDatetimeLocalValue(new Date().toISOString()));
+      setFormShowOnTimeline(true);
+      setFormTopicIds(new Set());
+      setEditorOpen(true);
+    };
+
+    const openEdit = (ev: ManagedEvent) => {
+      setEditingId(ev.id);
+      setFormTitle(ev.title);
+      setFormSummary(ev.summary);
+      setFormSpeakerHighlights(ev.speaker_highlights ?? '');
+      setFormOccurred(toDatetimeLocalValue(ev.occurred_at));
+      setFormShowOnTimeline(!ev.timeline_hidden);
+      setFormTopicIds(new Set(ev.topics));
+      setEditorOpen(true);
+    };
+
+    const closeEditor = () => {
+      setEditorOpen(false);
+      setEditingId(null);
+    };
+
+    const saveEditor = async () => {
+      if (!formTitle.trim()) {
+        alert('请填写标题');
+        return;
+      }
+      const occurredIso = fromDatetimeLocalValue(formOccurred);
+      setBusy(true);
+      try {
+        const payload = {
+          title: formTitle.trim(),
+          summary: formSummary.trim(),
+          speaker_highlights: formSpeakerHighlights.trim(),
+          occurred_at: occurredIso,
+          timeline_hidden: !formShowOnTimeline,
+          topic_ids: [...formTopicIds],
+        };
+        if (editingId) await api.events.update(editingId, payload);
+        else await api.events.create(payload);
+        closeEditor();
+        await loadRows();
+        await refreshTimeline();
+      } catch (e) {
+        alert(String(e));
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    const toggleRowSelect = (id: string) => {
+      setSelected(prev => {
+        const n = new Set(prev);
+        if (n.has(id)) n.delete(id);
+        else n.add(id);
+        return n;
+      });
+    };
+
+    const toggleSelectAll = () => {
+      if (selected.size === rows.length && rows.length > 0) setSelected(new Set());
+      else setSelected(new Set(rows.map(r => r.id)));
+    };
+
+    const deleteOne = async (id: string) => {
+      if (!confirm('确定从数据库删除该事件？不可恢复。')) return;
+      setBusy(true);
+      try {
+        await api.events.remove(id);
+        setSelected(prev => {
+          const n = new Set(prev);
+          n.delete(id);
+          return n;
+        });
+        await loadRows();
+        await refreshTimeline();
+      } catch (e) {
+        alert(String(e));
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    const bulkDelete = async () => {
+      if (selected.size === 0) return;
+      if (!confirm(`确定删除选中的 ${selected.size} 条事件？不可恢复。`)) return;
+      setBusy(true);
+      try {
+        await api.events.bulkRemove([...selected]);
+        setSelected(new Set());
+        await loadRows();
+        await refreshTimeline();
+      } catch (e) {
+        alert(String(e));
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    const toggleTopicPick = (topicId: string) => {
+      setFormTopicIds(prev => {
+        const n = new Set(prev);
+        if (n.has(topicId)) n.delete(topicId);
+        else n.add(topicId);
+        return n;
+      });
+    };
+
+    return (
+      <div className="space-y-4">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h3 className="text-sm font-medium text-neutral-500">事件管理</h3>
+            <p className="text-xs text-neutral-400 mt-0.5">
+              在此增删改查全部事件；时间轴上的「×」仅隐藏显示，不会删除记录。
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void loadRows()}
+              disabled={loading || busy}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-neutral-100 text-neutral-700 hover:bg-neutral-200 disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+              刷新
+            </button>
+            <button
+              type="button"
+              onClick={openCreate}
+              disabled={busy}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-50"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              新增
+            </button>
+            <button
+              type="button"
+              onClick={() => void bulkDelete()}
+              disabled={busy || selected.size === 0}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 disabled:opacity-50"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              批量删除 ({selected.size})
+            </button>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto rounded-xl border border-neutral-200 bg-white">
+          <table className="min-w-full text-sm">
+            <thead>
+              <tr className="border-b border-neutral-200 bg-neutral-50 text-left text-xs text-neutral-500">
+                <th className="p-2 w-10">
+                  <input
+                    type="checkbox"
+                    checked={rows.length > 0 && selected.size === rows.length}
+                    onChange={toggleSelectAll}
+                    className="rounded border-neutral-300"
+                  />
+                </th>
+                <th className="p-2">时间轴</th>
+                <th className="p-2 min-w-[120px]">标题</th>
+                <th className="p-2 min-w-[200px]">摘要</th>
+                <th className="p-2 min-w-[160px]">发言要点</th>
+                <th className="p-2 whitespace-nowrap">时间</th>
+                <th className="p-2 min-w-[140px]">主题</th>
+                <th className="p-2 w-24 text-right">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading && (
+                <tr>
+                  <td colSpan={8} className="p-8 text-center text-neutral-400">
+                    <Loader2 className="w-5 h-5 animate-spin inline-block mr-2 align-middle" />
+                    加载中…
+                  </td>
+                </tr>
+              )}
+              {!loading && rows.length === 0 && (
+                <tr>
+                  <td colSpan={8} className="p-8 text-center text-neutral-400 text-sm">暂无事件</td>
+                </tr>
+              )}
+              {!loading &&
+                rows.map(ev => (
+                  <tr key={ev.id} className="border-b border-neutral-100 hover:bg-neutral-50/80">
+                    <td className="p-2 align-top">
+                      <input
+                        type="checkbox"
+                        checked={selected.has(ev.id)}
+                        onChange={() => toggleRowSelect(ev.id)}
+                        className="rounded border-neutral-300"
+                      />
+                    </td>
+                    <td className="p-2 align-top text-xs">
+                      {ev.timeline_hidden ? (
+                        <span className="text-amber-600">已隐藏</span>
+                      ) : (
+                        <span className="text-green-600">显示</span>
+                      )}
+                    </td>
+                    <td className="p-2 align-top font-medium text-neutral-900 max-w-[200px]">
+                      <span className="line-clamp-2">{ev.title}</span>
+                    </td>
+                    <td className="p-2 align-top text-neutral-600 max-w-xs">
+                      <span className="line-clamp-2">{ev.summary || '—'}</span>
+                    </td>
+                    <td className="p-2 align-top text-xs text-neutral-500 max-w-[200px]">
+                      <span className="line-clamp-3">{ev.speaker_highlights?.trim() || '—'}</span>
+                    </td>
+                    <td className="p-2 align-top text-xs text-neutral-500 whitespace-nowrap">
+                      {new Date(ev.occurred_at).toLocaleString('zh-CN')}
+                    </td>
+                    <td className="p-2 align-top text-xs">
+                      <div className="flex flex-wrap gap-1">
+                        {ev.topics.length === 0 && <span className="text-neutral-400">—</span>}
+                        {ev.topics.map(tid => {
+                          const t = topicOptions.find(tp => tp.topic_id === tid);
+                          return (
+                            <span key={tid} className="px-1.5 py-0.5 rounded-full bg-neutral-100 text-neutral-600">
+                              {t?.name ?? tid.slice(0, 8)}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </td>
+                    <td className="p-2 align-top text-right whitespace-nowrap">
+                      <button
+                        type="button"
+                        onClick={() => openEdit(ev)}
+                        disabled={busy}
+                        className="p-1.5 rounded-lg text-neutral-500 hover:bg-neutral-100 inline-flex"
+                        title="编辑"
+                      >
+                        <Pencil className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void deleteOne(ev.id)}
+                        disabled={busy}
+                        className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 inline-flex"
+                        title="删除"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </div>
+
+        {editorOpen && (
+          <div
+            className="fixed inset-0 bg-black/30 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+            onClick={closeEditor}
+          >
+            <div
+              className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-xl max-h-[90vh] overflow-y-auto"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-semibold text-neutral-900">
+                  {editingId ? '编辑事件' : '新增事件'}
+                </h3>
+                <button type="button" onClick={closeEditor} className="p-1 hover:bg-neutral-100 rounded-lg">
+                  <X className="w-5 h-5 text-neutral-400" />
+                </button>
+              </div>
+              <div className="space-y-3">
+                <div>
+                  <label className="text-xs text-neutral-500 mb-1 block">标题</label>
+                  <input
+                    type="text"
+                    value={formTitle}
+                    onChange={e => setFormTitle(e.target.value)}
+                    className="w-full px-3 py-2 bg-neutral-50 border border-neutral-200 rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-neutral-500 mb-1 block">摘要</label>
+                  <textarea
+                    value={formSummary}
+                    onChange={e => setFormSummary(e.target.value)}
+                    rows={3}
+                    className="w-full px-3 py-2 bg-neutral-50 border border-neutral-200 rounded-lg text-sm resize-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-neutral-500 mb-1 block">发言要点（谁说了什么 / 观点）</label>
+                  <textarea
+                    value={formSpeakerHighlights}
+                    onChange={e => setFormSpeakerHighlights(e.target.value)}
+                    rows={2}
+                    placeholder="例如：张三：同意下周上线；李四：担心测试时间不够"
+                    className="w-full px-3 py-2 bg-neutral-50 border border-neutral-200 rounded-lg text-sm resize-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-neutral-500 mb-1 block">发生时间</label>
+                  <input
+                    type="datetime-local"
+                    value={formOccurred}
+                    onChange={e => setFormOccurred(e.target.value)}
+                    className="w-full px-3 py-2 bg-neutral-50 border border-neutral-200 rounded-lg text-sm"
+                  />
+                </div>
+                <label className="flex items-center gap-2 text-sm text-neutral-700">
+                  <input
+                    type="checkbox"
+                    checked={formShowOnTimeline}
+                    onChange={e => setFormShowOnTimeline(e.target.checked)}
+                    className="rounded border-neutral-300"
+                  />
+                  在时间轴上显示
+                </label>
+                <div>
+                  <p className="text-xs text-neutral-500 mb-2">关联主题（多选）</p>
+                  <div className="flex flex-wrap gap-2 max-h-32 overflow-y-auto p-2 bg-neutral-50 rounded-lg border border-neutral-200">
+                    {topicOptions.length === 0 && (
+                      <span className="text-xs text-neutral-400">暂无主题，请先在时间轴页创建</span>
+                    )}
+                    {topicOptions.map(t => (
+                      <label key={t.topic_id} className="inline-flex items-center gap-1 text-xs cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={formTopicIds.has(t.topic_id)}
+                          onChange={() => toggleTopicPick(t.topic_id)}
+                          className="rounded border-neutral-300"
+                        />
+                        <span>{t.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => void saveEditor()}
+                    disabled={busy}
+                    className="flex-1 py-2.5 rounded-xl bg-neutral-900 text-white text-sm font-medium hover:bg-neutral-800 disabled:opacity-50"
+                  >
+                    {busy ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : '保存'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={closeEditor}
+                    className="px-4 py-2.5 rounded-xl border border-neutral-200 text-sm text-neutral-600 hover:bg-neutral-50"
+                  >
+                    取消
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   };
@@ -631,6 +1076,7 @@ function App() {
     searchResults: Person[];
     searchLoading: boolean;
     searchLark: (q: string, type: 'person' | 'group') => Promise<void>;
+    clearSearch: () => void;
     addContact: (contact: {
       id: string;
       name: string;
@@ -639,7 +1085,13 @@ function App() {
       contact_type: 'person' | 'group';
     }) => Promise<void>;
     removeContact: (id: string) => Promise<void>;
-    patchContact: (id: string, data: Partial<Pick<Person, 'tags' | 'knows' | 'lastTalk' | 'talkCount' | 'autoReply' | 'syncMode' | 'syncLimit'>>) => Promise<void>;
+    patchContact: (
+      id: string,
+      data: Partial<Pick<Person, 'tags' | 'knows' | 'lastTalk' | 'talkCount' | 'autoReply' | 'intro'>> & {
+        syncMode?: Person['syncMode'] | null;
+        syncLimit?: number | null;
+      }
+    ) => Promise<void>;
     refreshContacts: () => Promise<void>;
     // Modal/UI state
     selectedContact: Person | null;
@@ -652,13 +1104,14 @@ function App() {
     setAddSearchQuery: (q: string) => void;
     addedIds: Set<string>;
     setAddedIds: Dispatch<SetStateAction<Set<string>>>;
+    // Global sync defaults (from Settings)
+    globalDefaultSyncMode: 'latest' | 'full';
+    globalDefaultSyncLimit: number;
+    globalFullSyncCap: number;
   }
 
   // ============ Contacts Page ============
   const ContactsPage = (props: ContactsPageProps) => {
-    // Debounce ref for search input in add dialog
-    const debounceRef = { current: 0 as ReturnType<typeof setTimeout> };
-
     // Summary drawer state
     const [summaryData, setSummaryData] = useState<{
       messages: Array<{ sender: string; content: string; time: string }>;
@@ -667,8 +1120,15 @@ function App() {
     const [summaryLoading, setSummaryLoading] = useState(false);
     const [summaryError, setSummaryError] = useState<string | null>(null);
     const [syncingContactIds, setSyncingContactIds] = useState<Set<string>>(new Set());
+    const [syncingAll, setSyncingAll] = useState(false);
     const [analyzingContact, setAnalyzingContact] = useState(false);
     const [analyzeMsg, setAnalyzeMsg] = useState<string | null>(null);
+    const [introDraft, setIntroDraft] = useState('');
+    const [introAiLoading, setIntroAiLoading] = useState(false);
+    const [introHint, setIntroHint] = useState<string | null>(null);
+    const [channelEvents, setChannelEvents] = useState<ContactLinkedEvent[]>([]);
+    const [channelEventsLoading, setChannelEventsLoading] = useState(false);
+    const [channelEventsError, setChannelEventsError] = useState<string | null>(null);
 
     // Load summary when selectedContact changes
     useEffect(() => {
@@ -676,6 +1136,8 @@ function App() {
         setSummaryData(null);
         setSummaryError(null);
         setAnalyzeMsg(null);
+        setChannelEvents([]);
+        setChannelEventsError(null);
         return;
       }
       setSummaryLoading(true);
@@ -692,6 +1154,53 @@ function App() {
         .finally(() => setSummaryLoading(false));
     }, [props.selectedContact?.id]);
 
+    useEffect(() => {
+      if (!props.selectedContact) {
+        setChannelEvents([]);
+        setChannelEventsError(null);
+        setChannelEventsLoading(false);
+        return;
+      }
+      const id = props.selectedContact.id;
+      let cancelled = false;
+      setChannelEventsLoading(true);
+      setChannelEventsError(null);
+      void api.contacts
+        .eventsForContact(id)
+        .then(r => {
+          if (!cancelled) setChannelEvents(r.events);
+        })
+        .catch(err => {
+          if (!cancelled) {
+            setChannelEventsError(String(err));
+            setChannelEvents([]);
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setChannelEventsLoading(false);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }, [props.selectedContact?.id]);
+
+    const openedIntro = (() => {
+      const s = props.selectedContact;
+      if (s == null) return '';
+      return (props.contacts.find(x => x.id === s.id) ?? s).intro ?? '';
+    })();
+
+    // 切换联系人、或列表中的 intro 字段变化时同步草稿（字符串相等则不会打断输入）
+    useEffect(() => {
+      if (!props.selectedContact) {
+        setIntroDraft('');
+        setIntroHint(null);
+        return;
+      }
+      setIntroDraft(openedIntro);
+      setIntroHint(null);
+    }, [props.selectedContact?.id, openedIntro]);
+
     const handleAnalyzeContact = async () => {
       if (!props.selectedContact) return;
       setAnalyzingContact(true);
@@ -699,6 +1208,12 @@ function App() {
       try {
         await api.ai.analyze(props.selectedContact.id);
         setAnalyzeMsg('分析完成，请查看时间轴');
+        try {
+          const r = await api.contacts.eventsForContact(props.selectedContact.id);
+          setChannelEvents(r.events);
+        } catch {
+          /* 事件列表刷新失败不阻断成功提示 */
+        }
       } catch (err) {
         setAnalyzeMsg('分析失败: ' + String(err));
       } finally {
@@ -708,18 +1223,31 @@ function App() {
 
     const handleSearchInput = (val: string) => {
       props.setAddSearchQuery(val);
-      clearTimeout(debounceRef.current);
-      debounceRef.current = setTimeout(() => {
-        props.searchLark(val, props.addContactType);
-      }, 500);
+    };
+
+    const runSearch = () => {
+      void props.searchLark(props.addSearchQuery, props.addContactType);
     };
 
     const handleTypeChange = (type: 'person' | 'group') => {
       props.setAddContactType(type);
       props.setAddSearchQuery('');
-      if (type === 'group') {
-        props.searchLark('', 'group');
-      }
+      props.clearSearch();
+    };
+
+    const effectiveSync = (contact: Person) => {
+      const mode: 'latest' | 'full' = contact.syncMode ?? props.globalDefaultSyncMode;
+      const fullCap = Math.max(1, props.globalFullSyncCap);
+      const latestDefault = Math.max(1, props.globalDefaultSyncLimit);
+
+      const latestNRaw = contact.syncLimit;
+      const latestN =
+        latestNRaw === undefined || latestNRaw === null || Number(latestNRaw) <= 0
+          ? latestDefault
+          : Math.max(1, Number(latestNRaw));
+
+      const maxMessages = mode === 'full' ? fullCap : latestN;
+      return { mode, maxMessages, latestN, fullCap };
     };
 
     const handleAdd = async (c: Person) => {
@@ -742,11 +1270,13 @@ function App() {
           next.add(contact.id);
           return next;
         });
-        const limit = contact.syncLimit || 20;
-        if (contact.contact_type === 'group') {
-          await api.messages.syncChat(contact.id, limit);
-        } else {
-          await api.messages.syncContact(contact.id, limit);
+        const { maxMessages } = effectiveSync(contact);
+        const result = contact.contact_type === 'group'
+          ? await api.messages.syncChat(contact.id, maxMessages)
+          : await api.messages.syncContact(contact.id, maxMessages);
+
+        if (!result.success) {
+          alert(`同步未完全成功（已尽力写入数据库）: ${result.error ?? 'unknown error'}`);
         }
         console.log('Synced:', contact.name);
       } catch (err) {
@@ -762,6 +1292,49 @@ function App() {
 
     const personContacts = props.contacts.filter(c => c.contact_type === 'person');
     const groupContacts = props.contacts.filter(c => c.contact_type === 'group');
+
+    /** 详情弹层：用 contacts 里最新记录，避免在弹层内 patch 后仍显示旧快照 */
+    const selected = props.selectedContact;
+    const detailContact =
+      selected == null ? null : props.contacts.find((x) => x.id === selected.id) ?? selected;
+
+    const handleSaveIntro = async () => {
+      if (!detailContact) return;
+      const saved = detailContact.intro ?? '';
+      if (introDraft === saved) {
+        setIntroHint('无修改');
+        setTimeout(() => setIntroHint(null), 1500);
+        return;
+      }
+      try {
+        await props.patchContact(detailContact.id, { intro: introDraft });
+        setIntroHint('已保存');
+        setTimeout(() => setIntroHint(null), 2000);
+      } catch (e) {
+        setIntroHint(`保存失败：${String(e)}`);
+      }
+    };
+
+    const handleIntroAi = async () => {
+      if (!detailContact) return;
+      setIntroAiLoading(true);
+      setIntroHint(null);
+      try {
+        const res = await api.contacts.summarizeIntro(detailContact.id);
+        if (!res.success || res.intro === undefined) {
+          setIntroHint(res.error ?? 'AI 总结失败');
+          return;
+        }
+        setIntroDraft(res.intro);
+        await props.patchContact(detailContact.id, { intro: res.intro });
+        setIntroHint('AI 总结已保存');
+        setTimeout(() => setIntroHint(null), 3000);
+      } catch (e) {
+        setIntroHint(String(e));
+      } finally {
+        setIntroAiLoading(false);
+      }
+    };
 
     // 计算全局自动回复状态：只要有一个开启就视为开启
     const anyAutoReplyEnabled = props.contacts.some(c => c.autoReply);
@@ -785,16 +1358,17 @@ function App() {
 
     // 全局同步所有联系人
     const handleSyncAll = async () => {
+      setSyncingAll(true);
       try {
-        // 先同步聊天列表（更新 contacts 和 chats）
-        await api.chats.sync();
-        // 再同步所有消息
-        await api.messages.syncAll(50);
+        // 仅同步「通讯录已添加」的联系人/群聊（后端按 settings + 单卡片覆盖计算条数）
+        await api.messages.syncAll({ fullSyncCap: props.globalFullSyncCap });
         // 最后刷新 contacts 以更新摘要等信息
         await props.refreshContacts();
         alert('全局同步完成');
       } catch (err) {
         alert('全局同步失败: ' + err);
+      } finally {
+        setSyncingAll(false);
       }
     };
 
@@ -810,27 +1384,32 @@ function App() {
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold text-neutral-900">通讯录</h2>
           <div className="flex items-center gap-2">
-            {/* 全局自动回复开关 */}
+            {/* 全局自动回复（样式与单卡片一致） */}
             <button
+              type="button"
               onClick={handleToggleAllAutoReply}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
+              className={`p-1.5 rounded-full transition-colors ${
                 anyAutoReplyEnabled
-                  ? 'bg-green-500 text-white hover:bg-green-600'
-                  : 'bg-neutral-100 text-neutral-500 hover:bg-neutral-200'
+                  ? 'bg-green-100 text-green-600 hover:bg-green-200'
+                  : 'bg-neutral-100 text-neutral-400 hover:bg-neutral-200'
               }`}
               title={anyAutoReplyEnabled ? '关闭所有自动回复' : '开启所有自动回复'}
             >
-              <Power className="w-3.5 h-3.5" />
-              {anyAutoReplyEnabled ? '全部开启' : '全部关闭'}
+              {anyAutoReplyEnabled ? (
+                <ToggleRight className="w-5 h-5" />
+              ) : (
+                <ToggleLeft className="w-5 h-5" />
+              )}
             </button>
-            {/* 全局同步按钮 */}
+            {/* 全局同步（样式与单卡片同步按钮一致） */}
             <button
+              type="button"
               onClick={handleSyncAll}
-              disabled={contactsStatus === 'loading'}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-500 text-white text-sm rounded-full hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              disabled={syncingAll || props.contactsStatus === 'loading'}
+              className="p-1.5 rounded-lg transition-colors hover:bg-neutral-100 text-neutral-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              title="全局更新（同步通讯录中全部对象）"
             >
-              <RefreshCw className={`w-4 h-4 ${contactsStatus === 'loading' ? 'animate-spin' : ''}`} />
-              全局更新
+              <RefreshCw className={`w-4 h-4 ${syncingAll ? 'animate-spin' : ''}`} />
             </button>
             {/* 添加联系人按钮 */}
             <button
@@ -863,7 +1442,7 @@ function App() {
               {personContacts.map((person) => (
                 <div
                   key={person.id}
-                  className="relative bg-white rounded-xl p-4 border border-neutral-200 hover:border-neutral-300 transition-all"
+                  className="relative bg-white rounded-xl p-4 pr-16 border border-neutral-200 hover:border-neutral-300 transition-all"
                 >
                   {/* Main clickable area (avatar + info) */}
                   <button
@@ -940,7 +1519,7 @@ function App() {
               {groupContacts.map((group) => (
                 <div
                   key={group.id}
-                  className="relative bg-white rounded-xl p-4 border border-neutral-200 hover:border-neutral-300 transition-all"
+                  className="relative bg-white rounded-xl p-4 pr-16 border border-neutral-200 hover:border-neutral-300 transition-all"
                 >
                   {/* Main clickable area */}
                   <button
@@ -1060,7 +1639,13 @@ function App() {
                   type="text"
                   value={props.addSearchQuery}
                   onChange={(e) => handleSearchInput(e.target.value)}
-                  placeholder={props.addContactType === 'person' ? '搜索姓名...' : '过滤群名称...'}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      runSearch();
+                    }
+                  }}
+                  placeholder={props.addContactType === 'person' ? '输入后按回车搜索…' : '输入关键词后按回车搜索…'}
                   autoFocus
                   className="w-full pl-9 pr-4 py-2.5 bg-neutral-50 border border-neutral-200 rounded-xl text-sm focus:outline-none focus:border-neutral-400"
                 />
@@ -1075,7 +1660,7 @@ function App() {
                 )}
                 {!props.searchLoading && props.searchResults.length === 0 && (
                   <div className="text-center py-8 text-neutral-400 text-sm">
-                    {props.addContactType === 'group' ? '输入群名称过滤' : '输入姓名搜索'}
+                    {props.addContactType === 'group' ? '输入关键词后按回车搜索' : '输入关键词后按回车搜索'}
                   </div>
                 )}
                 {props.searchResults.map((c) => {
@@ -1118,10 +1703,10 @@ function App() {
         )}
 
         {/* Contact detail modal — richer version with message summary */}
-        {selectedContact && (
+        {detailContact && (
           <div
             className="fixed inset-0 bg-black/30 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-0 sm:p-4"
-            onClick={() => setSelectedContact(null)}
+            onClick={() => props.setSelectedContact(null)}
           >
             <div
               className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md p-6 shadow-xl flex flex-col max-h-[90vh]"
@@ -1130,24 +1715,105 @@ function App() {
               {/* Header */}
               <div className="flex items-start justify-between mb-4 flex-shrink-0">
                 <div className="flex items-center gap-4">
-                  {props.selectedContact!.avatar
-                    ? <img src={props.selectedContact!.avatar} alt="" className={`w-14 h-14 bg-neutral-100 flex-shrink-0 ${props.selectedContact!.contact_type === 'group' ? 'rounded-xl' : 'rounded-full'}`} />
-                    : <div className={`w-14 h-14 bg-neutral-200 flex items-center justify-center flex-shrink-0 ${props.selectedContact!.contact_type === 'group' ? 'rounded-xl' : 'rounded-full'}`}>
-                        {props.selectedContact!.contact_type === 'group'
+                  {detailContact.avatar
+                    ? <img src={detailContact.avatar} alt="" className={`w-14 h-14 bg-neutral-100 flex-shrink-0 ${detailContact.contact_type === 'group' ? 'rounded-xl' : 'rounded-full'}`} />
+                    : <div className={`w-14 h-14 bg-neutral-200 flex items-center justify-center flex-shrink-0 ${detailContact.contact_type === 'group' ? 'rounded-xl' : 'rounded-full'}`}>
+                        {detailContact.contact_type === 'group'
                           ? <MessageCircle className="w-7 h-7 text-neutral-400" />
                           : <Users className="w-7 h-7 text-neutral-400" />
                         }
                       </div>
                   }
                   <div>
-                    <h3 className="text-lg font-semibold text-neutral-900">{props.selectedContact!.name}</h3>
-                    {props.selectedContact!.title && <p className="text-sm text-neutral-500">{props.selectedContact!.title}</p>}
-                    <p className="text-xs text-neutral-400 mt-0.5">{props.selectedContact!.contact_type === 'person' ? '联系人' : '群聊'}</p>
+                    <h3 className="text-lg font-semibold text-neutral-900">{detailContact.name}</h3>
+                    {detailContact.title && <p className="text-sm text-neutral-500">{detailContact.title}</p>}
+                    <p className="text-xs text-neutral-400 mt-0.5">{detailContact.contact_type === 'person' ? '联系人' : '群聊'}</p>
                   </div>
                 </div>
                 <button onClick={() => props.setSelectedContact(null)} className="p-1.5 hover:bg-neutral-100 rounded-lg flex-shrink-0">
                   <X className="w-5 h-5 text-neutral-400" />
                 </button>
+              </div>
+
+              {/* 简介：手动编辑 + AI 根据已同步消息总结 */}
+              <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-3 mb-4 flex-shrink-0 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs font-medium text-neutral-800">简介</p>
+                  {introHint && (
+                    <span className="text-[11px] text-neutral-500 truncate max-w-[55%]">{introHint}</span>
+                  )}
+                </div>
+                <textarea
+                  value={introDraft}
+                  onChange={e => setIntroDraft(e.target.value)}
+                  rows={4}
+                  placeholder="可手动填写；或点击下方「AI 总结」根据已同步到本地的聊天记录生成。"
+                  className="w-full px-3 py-2 text-sm bg-white border border-neutral-200 rounded-lg resize-none focus:outline-none focus:border-neutral-400"
+                />
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleSaveIntro()}
+                    className="px-3 py-1.5 text-xs font-medium rounded-lg bg-neutral-900 text-white hover:bg-neutral-800"
+                  >
+                    保存简介
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleIntroAi()}
+                    disabled={introAiLoading}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-purple-200 bg-purple-50 text-purple-800 hover:bg-purple-100 disabled:opacity-50"
+                  >
+                    {introAiLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Bot className="w-3.5 h-3.5" />}
+                    AI 总结
+                  </button>
+                </div>
+                <p className="text-[11px] text-neutral-400">
+                  AI 总结依赖设置中的大模型与 API Key；请先同步消息到本地。
+                </p>
+              </div>
+
+              {/* 单对象消息同步：仅条数覆盖 + 恢复默认（模式与全量仍由设置页控制） */}
+              <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-3 mb-4 flex-shrink-0">
+                <p className="text-xs font-medium text-neutral-800 mb-2">同步条数</p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs text-neutral-600">每次最新</span>
+                  <input
+                    key={`detail-sl-${detailContact.id}-${String(detailContact.syncLimit)}-${String(detailContact.syncMode)}`}
+                    type="number"
+                    min={1}
+                    disabled={(detailContact.syncMode ?? props.globalDefaultSyncMode) === 'full'}
+                    defaultValue={detailContact.syncLimit != null ? String(detailContact.syncLimit) : ''}
+                    placeholder={String(props.globalDefaultSyncLimit)}
+                    title={
+                      (detailContact.syncMode ?? props.globalDefaultSyncMode) === 'full'
+                        ? '此对象当前为全量同步，可先点「恢复默认」再改条数'
+                        : '留空表示使用设置页默认条数'
+                    }
+                    onBlur={(e) => {
+                      const raw = e.target.value.trim();
+                      if (!raw) {
+                        void props.patchContact(detailContact.id, { syncLimit: null });
+                        return;
+                      }
+                      const n = Number(raw);
+                      if (!Number.isFinite(n) || n <= 0) return;
+                      void props.patchContact(detailContact.id, { syncLimit: n });
+                    }}
+                    className="w-20 px-2 py-1.5 text-sm bg-white border border-neutral-200 rounded-lg disabled:opacity-50"
+                  />
+                  <span className="text-xs text-neutral-500">条</span>
+                  <button
+                    type="button"
+                    className="text-xs text-neutral-500 hover:text-neutral-800 underline decoration-neutral-300 underline-offset-2"
+                    onClick={() => void props.patchContact(detailContact.id, { syncMode: null, syncLimit: null })}
+                  >
+                    恢复默认
+                  </button>
+                </div>
+                <p className="text-[11px] text-neutral-400 mt-2">
+                  留空即跟设置页；全量模式请在设置中调整。
+                </p>
               </div>
 
               {/* Action buttons */}
@@ -1168,6 +1834,48 @@ function App() {
                   {analyzeMsg}
                 </div>
               )}
+
+              {/* 本对象关联的 AI 事件（时间新→旧，在消息列表上方） */}
+              <div className="rounded-xl border border-neutral-200 bg-white p-3 mb-4 flex-shrink-0 flex flex-col max-h-[min(40vh,280px)] min-h-0">
+                <p className="text-xs font-medium text-neutral-800 mb-2 flex-shrink-0">本对象事件</p>
+                <p className="text-[11px] text-neutral-400 mb-2 flex-shrink-0">
+                  来自对此联系人/群聊的 AI 分析；越靠上越新。
+                </p>
+                {channelEventsLoading && (
+                  <div className="flex items-center justify-center py-6">
+                    <Loader2 className="w-5 h-5 animate-spin text-neutral-400" />
+                  </div>
+                )}
+                {channelEventsError && !channelEventsLoading && (
+                  <div className="text-xs text-red-500 py-2">{channelEventsError}</div>
+                )}
+                {!channelEventsLoading && !channelEventsError && channelEvents.length === 0 && (
+                  <div className="text-xs text-neutral-400 py-3 text-center">暂无事件，可先同步消息后点「AI 分析」</div>
+                )}
+                {!channelEventsLoading && channelEvents.length > 0 && (
+                  <div className="overflow-y-auto space-y-2 pr-0.5 min-h-0 flex-1">
+                    {channelEvents.map(ev => (
+                      <div key={ev.id} className="p-2.5 rounded-lg bg-neutral-50 border border-neutral-100">
+                        <div className="flex items-start justify-between gap-2 mb-1">
+                          <span className="text-xs font-semibold text-neutral-900 leading-snug">{ev.title}</span>
+                          <span className="text-[10px] text-neutral-400 flex-shrink-0 whitespace-nowrap">
+                            {formatMsgTime(ev.occurred_at)}
+                          </span>
+                        </div>
+                        {ev.summary?.trim() ? (
+                          <p className="text-xs text-neutral-600 leading-relaxed line-clamp-2">{ev.summary}</p>
+                        ) : null}
+                        {ev.speaker_highlights?.trim() ? (
+                          <p className="text-[11px] text-neutral-500 mt-1 line-clamp-2">
+                            <span className="font-medium text-neutral-600">发言：</span>
+                            {ev.speaker_highlights}
+                          </p>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
 
               {/* Messages section */}
               <div className="flex-1 overflow-hidden flex flex-col min-h-0">
@@ -1211,22 +1919,55 @@ function App() {
   // ============ Settings Page ============
   const SettingsPage = () => (
     <div className="space-y-6">
-      <div className="bg-white rounded-xl p-4 border border-neutral-200">
-        <div className="flex items-center justify-between">
+      <div className="bg-white rounded-xl p-4 border border-neutral-200 space-y-4">
+        <div className="flex items-center gap-2">
+          <Timer className="w-4 h-4 text-neutral-400" />
+          <h3 className="font-medium text-neutral-900">后台消息同步</h3>
+        </div>
+        <p className="text-xs text-neutral-500">
+          开启后按设定间隔自动拉取通讯录中所有联系人/群组的最新消息（与手动「同步消息」相同逻辑）。关闭后仅可手动同步。
+        </p>
+        <div className="flex items-center justify-between gap-4">
           <div>
-            <p className="font-medium text-neutral-900">自动回复</p>
-            <p className="text-xs text-neutral-500 mt-0.5">开启后 AI 将自动回复消息</p>
+            <p className="text-sm font-medium text-neutral-800">定时同步</p>
+            <p className="text-xs text-neutral-500 mt-0.5">保存设置后生效；关闭时每约 5 秒检测一次是否重新开启，一般无需重启服务。</p>
           </div>
           <button
-            onClick={() => setSettings(s => ({ ...s, autoReplyEnabled: !s.autoReplyEnabled }))}
-            className={`w-12 h-6 rounded-full transition-colors relative ${
-              settings.autoReplyEnabled ? 'bg-green-500' : 'bg-neutral-300'
+            type="button"
+            onClick={() => setSettings(s => ({ ...s, messageSyncPollingEnabled: !s.messageSyncPollingEnabled }))}
+            className={`w-12 h-6 rounded-full transition-colors relative flex-shrink-0 ${
+              settings.messageSyncPollingEnabled ? 'bg-green-500' : 'bg-neutral-300'
             }`}
           >
-            <div className={`w-5 h-5 bg-white rounded-full absolute top-0.5 transition-all ${
-              settings.autoReplyEnabled ? 'left-[26px]' : 'left-0.5'
-            }`} />
+            <div
+              className={`w-5 h-5 bg-white rounded-full absolute top-0.5 transition-all ${
+                settings.messageSyncPollingEnabled ? 'left-[26px]' : 'left-0.5'
+              }`}
+            />
           </button>
+        </div>
+        <div>
+          <label className="text-xs text-neutral-500 mb-1 block">同步间隔（秒）</label>
+          <input
+            type="number"
+            min={30}
+            max={7200}
+            step={30}
+            value={settings.messageSyncIntervalSec}
+            onChange={e => {
+              const v = parseInt(e.target.value, 10);
+              setSettings(s => ({
+                ...s,
+                messageSyncIntervalSec: Number.isFinite(v) ? v : s.messageSyncIntervalSec,
+              }));
+            }}
+            onBlur={() => {
+              const n = Math.max(30, Math.min(7200, settings.messageSyncIntervalSec || 60));
+              setSettings(s => ({ ...s, messageSyncIntervalSec: n }));
+            }}
+            className="w-full max-w-xs px-3 py-2 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:border-neutral-400"
+          />
+          <p className="text-[11px] text-neutral-400 mt-1">允许范围 30～7200 秒，保存时服务端会再次校验。</p>
         </div>
       </div>
 
@@ -1282,6 +2023,61 @@ function App() {
         <p className="text-xs text-neutral-400">分析对话时发送给 Kimi 的默认指令</p>
       </div>
 
+      <div className="bg-white rounded-xl p-4 border border-neutral-200 space-y-4">
+        <div className="flex items-center gap-2">
+          <RefreshCw className="w-4 h-4 text-neutral-400" />
+          <h3 className="font-medium text-neutral-900">消息同步默认值</h3>
+        </div>
+        <p className="text-xs text-neutral-500">
+          通讯录里未单独设置的对象，手动/自动同步都会使用该默认值；「全量」会尽量分页拉取，但仍受「全量上限」保护。
+        </p>
+        <div className="space-y-3">
+          <div>
+            <label className="text-xs text-neutral-500 mb-1 block">默认同步模式</label>
+            <select
+              value={settings.defaultSyncMode}
+              onChange={(e) =>
+                setSettings(s => ({ ...s, defaultSyncMode: e.target.value as 'latest' | 'full' }))
+              }
+              className="w-full px-3 py-2 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:border-neutral-400"
+            >
+              <option value="latest">最新 N 条</option>
+              <option value="full">全量（上限见下方）</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-neutral-500 mb-1 block">默认条数 N（仅「最新」模式）</label>
+            <input
+              type="number"
+              min={1}
+              disabled={settings.defaultSyncMode === 'full'}
+              value={settings.defaultSyncLimit}
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                if (!Number.isFinite(n) || n <= 0) return;
+                setSettings(s => ({ ...s, defaultSyncLimit: n }));
+              }}
+              className="w-full px-3 py-2 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:border-neutral-400"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-neutral-500 mb-1 block">全量同步上限（条）</label>
+            <input
+              type="number"
+              min={1}
+              value={settings.fullSyncCap}
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                if (!Number.isFinite(n) || n <= 0) return;
+                setSettings(s => ({ ...s, fullSyncCap: n }));
+              }}
+              className="w-full px-3 py-2 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:border-neutral-400"
+            />
+            <p className="text-xs text-neutral-400 mt-1">用于「全量」模式的安全上限，避免一次拉取过大。</p>
+          </div>
+        </div>
+      </div>
+
       <button
         onClick={saveSettings}
         disabled={settingsStatus === 'saving'}
@@ -1300,6 +2096,7 @@ function App() {
   const tabs: { id: Tab; label: string; icon: typeof Bot }[] = [
     { id: 'status', label: '状态', icon: Bot },
     { id: 'timeline', label: '时间轴', icon: Clock },
+    { id: 'events', label: '事件', icon: Table2 },
     { id: 'contacts', label: '通讯录', icon: Users },
     { id: 'settings', label: '设置', icon: Settings },
   ];
@@ -1376,9 +2173,10 @@ function App() {
         </header>
 
         {/* Page Content */}
-        <div className="p-4 lg:p-8 max-w-3xl">
+        <div className={`p-4 lg:p-8 ${activeTab === 'events' ? 'max-w-6xl' : 'max-w-3xl'}`}>
           {activeTab === 'status' && <StatusPage />}
           {activeTab === 'timeline' && <TimelinePage />}
+          {activeTab === 'events' && <EventsPage />}
           {activeTab === 'contacts' && (
             <ContactsPage
               contacts={contacts}
@@ -1386,10 +2184,14 @@ function App() {
               searchResults={searchResults}
               searchLoading={searchLoading}
               searchLark={searchLark}
+              clearSearch={clearSearch}
               addContact={addContact}
               removeContact={removeContact}
               patchContact={patchContact}
               refreshContacts={refreshContacts}
+              globalDefaultSyncMode={settings.defaultSyncMode}
+              globalDefaultSyncLimit={settings.defaultSyncLimit}
+              globalFullSyncCap={settings.fullSyncCap}
               selectedContact={selectedContact}
               setSelectedContact={setSelectedContact}
               showAddContact={showAddContact}

@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { getDb } from '../db/connection.js';
+import { ingestAliasesFromMessage, relabelMessagesInChat, resolveSenderDisplayName } from './senderDirectory.js';
 
 const execFileAsync = promisify(execFile);
 const IS_WIN = process.platform === 'win32';
@@ -65,6 +66,13 @@ async function runLarkCli(args: string[]): Promise<unknown> {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function getSettingInt(key: string, fallback: number): number {
+  const db = getDb();
+  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined;
+  const n = parseInt(row?.value ?? '', 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
 
 /**
  * Extract plain text from a Feishu message body.content JSON.
@@ -215,11 +223,9 @@ function upsertMessage(msg: any, senderId: string, senderName: string, storeChat
 }
 
 function getSenderName(msg: any): { senderId: string; senderName: string } {
-  const senderId = msg.sender?.id ?? '';
-  // Try to look up name from contacts table
-  const db = getDb();
-  const contact = db.prepare('SELECT name FROM contacts WHERE open_id = ?').get(senderId) as { name: string } | undefined;
-  const senderName = contact?.name ?? senderId;
+  ingestAliasesFromMessage(msg);
+  const senderId = (msg.sender?.id ?? '').trim();
+  const senderName = resolveSenderDisplayName(senderId);
   return { senderId, senderName };
 }
 
@@ -280,6 +286,8 @@ export async function syncChatMessages(
       ).run(newest.create_time, chatId);
     }
 
+    relabelMessagesInChat(effectiveChatId);
+
     console.log(`[syncMessages] ${effectiveChatId}: fetched=${messages.length} inserted=${inserted}`);
     return { chatId: effectiveChatId, fetched: messages.length, inserted };
 
@@ -291,46 +299,60 @@ export async function syncChatMessages(
 }
 
 /**
- * Sync messages for ALL monitored chats in the database.
- * Also syncs P2P messages for monitored person-type contacts.
- * Runs sequentially to avoid hammering the API.
+ * Sync messages for entries in the local address book (`contacts` table).
+ *
+ * Notes:
+ * - "Added to address book" == present in `contacts`.
+ * - Person chats use lark-cli P2P mode (`--user-id`).
+ * - Group chats use lark-cli group mode (`--chat-id`) with `open_id` holding the chat id (`oc_...`).
  */
-export async function syncAllMonitoredChats(
-  maxPerChat = 50,
-): Promise<{ results: MessageSyncResult[]; totalInserted: number }> {
+export async function syncAllMonitoredChats(opts?: {
+  /** Override settings.fullSyncCap for this run */
+  fullSyncCap?: number;
+}): Promise<{ results: MessageSyncResult[]; totalInserted: number }> {
   const db = getDb();
 
-  // Group chats
-  const chats = db.prepare(
-    'SELECT chat_id FROM chats WHERE is_monitoring = 1 ORDER BY last_active_at DESC'
-  ).all() as { chat_id: string }[];
+  const defaultLatest = getSettingInt('defaultSyncLimit', 30);
+  const fullCap = opts?.fullSyncCap ?? getSettingInt('fullSyncCap', 5000);
+  const defaultModeRaw = (() => {
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('defaultSyncMode') as { value: string } | undefined;
+    const v = (row?.value ?? 'latest').toLowerCase();
+    return v === 'full' ? 'full' : 'latest';
+  })();
 
-  // Person contacts with monitoring enabled (stored as is_monitoring in chats table, or all persons)
-  // We include all person contacts from contacts table (is_monitoring on chats may not apply here)
-  const personContacts = db.prepare(
-    `SELECT open_id FROM contacts WHERE contact_type = 'person'`
-  ).all() as { open_id: string }[];
+  const rows = db.prepare(`
+    SELECT open_id, contact_type, sync_mode, sync_limit
+    FROM contacts
+    ORDER BY contact_type ASC, name ASC
+  `).all() as Array<{ open_id: string; contact_type: string; sync_mode: string | null; sync_limit: number | null }>;
 
-  const totalChats = chats.length + personContacts.length;
-  console.log(`[syncMessages] Syncing messages for ${chats.length} monitored chats + ${personContacts.length} person contacts`);
+  console.log(`[syncMessages] Syncing messages for ${rows.length} address-book contacts (person+group)`);
 
   const results: MessageSyncResult[] = [];
 
-  // Sync group chats
-  for (const chat of chats) {
-    const result = await syncChatMessages(chat.chat_id, maxPerChat, 'group');
-    results.push(result);
-    await new Promise(r => setTimeout(r, 200));
-  }
+  for (const row of rows) {
+    const mode = (row.sync_mode === 'full' || row.sync_mode === 'latest'
+      ? row.sync_mode
+      : defaultModeRaw) as 'latest' | 'full';
+    const latestN =
+      row.sync_limit === null || row.sync_limit === undefined
+        ? defaultLatest
+        : Math.max(1, Number(row.sync_limit));
 
-  // Sync P2P contacts
-  for (const contact of personContacts) {
-    const result = await syncChatMessages(contact.open_id, maxPerChat, 'p2p', contact.open_id);
-    results.push(result);
+    const perLimit = mode === 'full' ? fullCap : latestN;
+
+    if (row.contact_type === 'group') {
+      const result = await syncChatMessages(row.open_id, perLimit, 'group');
+      results.push(result);
+    } else {
+      const result = await syncChatMessages(row.open_id, perLimit, 'p2p', row.open_id);
+      results.push(result);
+    }
+
     await new Promise(r => setTimeout(r, 200));
   }
 
   const totalInserted = results.reduce((sum, r) => sum + r.inserted, 0);
-  console.log(`[syncMessages] Done. ${totalChats} targets. Total inserted: ${totalInserted}`);
+  console.log(`[syncMessages] Done. ${rows.length} targets. Total inserted: ${totalInserted}`);
   return { results, totalInserted };
 }

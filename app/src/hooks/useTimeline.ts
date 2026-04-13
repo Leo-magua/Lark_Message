@@ -35,11 +35,11 @@ export function useTimeline() {
   useEffect(() => { load(); }, [load]);
 
   /** Sync messages for all monitored chats, then reload timeline */
-  const syncMessages = useCallback(async (maxPerChat = 50) => {
+  const syncMessages = useCallback(async (opts?: { fullSyncCap?: number }) => {
     setSyncStatus('syncing');
     setSyncInfo(null);
     try {
-      const result = await api.messages.syncAll(maxPerChat);
+      const result = await api.messages.syncAll(opts);
       const info = `同步完成：${result.totalInserted ?? 0} 条新消息（${result.chats ?? 0} 个群组）`;
       setSyncInfo(info);
       setSyncStatus('done');
@@ -128,6 +128,17 @@ export function useTimeline() {
     }
   }, [topics, load]);
 
+  /** 仅从时间轴隐藏，数据库中仍存在，可在「事件」页恢复显示 */
+  const hideEventFromTimeline = useCallback(async (eventId: string) => {
+    try {
+      await api.events.update(eventId, { timeline_hidden: true });
+      await load();
+    } catch (err) {
+      console.error('[useTimeline] hideEventFromTimeline', err);
+      alert(`从时间轴移除失败：${String(err)}`);
+    }
+  }, [load]);
+
   const toggleTopicVisibility = useCallback(async (topicId: string) => {
     // topicId = Topic.id (numeric row id from backend)
     const topic = topics.find(t => t.id === topicId);
@@ -167,6 +178,7 @@ export function useTimeline() {
     deleteTopic,
     toggleTopicVisibility,
     refresh: load,
+    hideEventFromTimeline,
     syncMessages,
     analyzeContact,
     analyzeAll,

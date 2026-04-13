@@ -120,6 +120,10 @@ export const mockSettings: Settings = {
   openaiKey: '',
   openaiUrl: 'https://api.openai.com/v1',
   kimiCommand: '请帮我分析这段对话的重点',
-  autoReplyEnabled: true,
   modelId: 'step-3.5-flash-2603',
+  messageSyncPollingEnabled: false,
+  messageSyncIntervalSec: 60,
+  defaultSyncMode: 'latest',
+  defaultSyncLimit: 30,
+  fullSyncCap: 5000,
 };

@@ -1,8 +1,8 @@
 // Central typed fetch wrapper for all backend API calls.
-// In dev: Vite proxy forwards /api → localhost:3001
+// In dev: Vite proxy forwards /api → localhost:8001（见 `app/vite.config.ts`）
 // In prod: same-origin, no change needed
 
-import type { Person, Channel, Topic, TimelineEvent, Settings, Knowledge, Template, AutoReplyChannel, AutoReplyConfig } from '@/types';
+import type { Person, Channel, Topic, TimelineEvent, ManagedEvent, Settings, Knowledge, Template, AutoReplyChannel, AutoReplyConfig, ContactLinkedEvent } from '@/types';
 
 const BASE = '/api';
 
@@ -44,8 +44,23 @@ export interface AiAnalyzeAllResult {
 
 async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
-  if (!res.ok) throw new Error(`${init?.method ?? 'GET'} ${url} failed: ${res.status}`);
-  return res.json() as Promise<T>;
+  const text = await res.text();
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const j = JSON.parse(text) as { error?: string; message?: string };
+      detail = (j.error ?? j.message ?? '').trim();
+    } catch {
+      if (text.trim()) detail = text.trim().slice(0, 300);
+    }
+    const suffix = detail ? `: ${detail}` : '';
+    throw new Error(`${init?.method ?? 'GET'} ${url} failed: ${res.status}${suffix}`);
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(`${init?.method ?? 'GET'} ${url}: invalid JSON response`);
+  }
 }
 
 export const api = {
@@ -88,12 +103,16 @@ export const api = {
      */
     patch: async (
       id: string,
-      data: Partial<Pick<Person, 'tags' | 'knows' | 'lastTalk' | 'talkCount' | 'autoReply' | 'syncMode' | 'syncLimit'>>
+      data: Partial<Pick<Person, 'tags' | 'knows' | 'lastTalk' | 'talkCount' | 'autoReply' | 'intro'>> & {
+        syncMode?: Person['syncMode'] | null;
+        syncLimit?: number | null;
+      }
     ): Promise<{ success: boolean }> => {
       const body: any = { ...data };
       // Convert snake_case for backend
       if (data.syncMode !== undefined) body.sync_mode = data.syncMode;
       if (data.syncLimit !== undefined) body.sync_limit = data.syncLimit;
+      if (data.intro !== undefined) body.intro = data.intro;
       return apiFetch<{ success: boolean }>(`${BASE}/contacts/${encodeURIComponent(id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -111,6 +130,23 @@ export const api = {
       last_message_at: string;
     }> => {
       return apiFetch(`${BASE}/contacts/${encodeURIComponent(id)}/summary`);
+    },
+
+    /** AI 分析写入的、与该联系人/群关联的事件（时间新→旧） */
+    eventsForContact: async (id: string): Promise<{ events: ContactLinkedEvent[] }> => {
+      return apiFetch<{ events: ContactLinkedEvent[] }>(
+        `${BASE}/contacts/${encodeURIComponent(id)}/events`
+      );
+    },
+
+    /** 根据本地已同步消息，用 LLM 生成简介（不自动落库，前端需再 PATCH intro） */
+    summarizeIntro: async (
+      id: string
+    ): Promise<{ success: boolean; intro?: string; error?: string }> => {
+      return apiFetch<{ success: boolean; intro?: string; error?: string }>(
+        `${BASE}/contacts/${encodeURIComponent(id)}/intro-ai`,
+        { method: 'POST' }
+      );
     },
   },
 
@@ -137,11 +173,11 @@ export const api = {
 
   messages: {
     /** Sync messages for ALL monitored chats (may take a while) */
-    syncAll: async (maxPerChat = 50): Promise<MessageSyncResult> => {
+    syncAll: async (opts?: { fullSyncCap?: number }): Promise<MessageSyncResult> => {
       return apiFetch<MessageSyncResult>(`${BASE}/messages/sync`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ maxPerChat }),
+        body: JSON.stringify({ ...(opts ?? {}) }),
       });
     },
 
@@ -191,6 +227,68 @@ export const api = {
     /** Get AI-analyzed events + topics from backend */
     get: async (): Promise<TimelineData> => {
       return apiFetch<TimelineData>(`${BASE}/timeline`);
+    },
+  },
+
+  events: {
+    list: async (params?: { limit?: number; offset?: number }): Promise<{ events: ManagedEvent[] }> => {
+      const url = new URL(`${BASE}/events`);
+      if (params?.limit != null) url.searchParams.set('limit', String(params.limit));
+      if (params?.offset != null) url.searchParams.set('offset', String(params.offset));
+      return apiFetch<{ events: ManagedEvent[] }>(url.toString());
+    },
+
+    get: async (id: string): Promise<ManagedEvent> => {
+      return apiFetch<ManagedEvent>(`${BASE}/events/${encodeURIComponent(id)}`);
+    },
+
+    create: async (data: {
+      title: string;
+      summary?: string;
+      speaker_highlights?: string;
+      occurred_at?: string;
+      topic_ids?: string[];
+      timeline_hidden?: boolean;
+      source_chat_id?: string | null;
+      source_contact_id?: string | null;
+    }): Promise<ManagedEvent> => {
+      return apiFetch<ManagedEvent>(`${BASE}/events`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+    },
+
+    update: async (
+      id: string,
+      data: Partial<{
+        title: string;
+        summary: string;
+        speaker_highlights: string;
+        occurred_at: string;
+        timeline_hidden: boolean;
+        topic_ids: string[];
+        source_chat_id: string | null;
+        source_contact_id: string | null;
+      }>
+    ): Promise<ManagedEvent> => {
+      return apiFetch<ManagedEvent>(`${BASE}/events/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+    },
+
+    remove: async (id: string): Promise<void> => {
+      await apiFetch<{ success: boolean }>(`${BASE}/events/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    },
+
+    bulkRemove: async (ids: string[]): Promise<{ success: boolean; deleted: number }> => {
+      return apiFetch<{ success: boolean; deleted: number }>(`${BASE}/events/bulk-delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      });
     },
   },
 

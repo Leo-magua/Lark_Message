@@ -11,15 +11,72 @@ import aiRouter from './routes/ai.js';
 import knowledgeRouter from './routes/knowledge.js';
 import templatesRouter from './routes/templates.js';
 import autoReplyConfigRouter from './routes/autoReplyConfig.js';
+import eventsRouter from './routes/events.js';
 import { syncAllMonitoredChats } from './services/syncMessages.js';
-import { checkAndAutoReplyAll, loadPollingInterval } from './services/autoReply.js';
+import { checkAndAutoReplyAll } from './services/autoReply.js';
 
 const PORT = Number(process.env.PORT ?? 8001);
+
+function readMessageSyncPollingFromDb(): { enabled: boolean; intervalSec: number } {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT key, value FROM settings WHERE key IN ('messageSyncPollingEnabled', 'messageSyncIntervalSec')`
+    )
+    .all() as { key: string; value: string }[];
+  const map: Record<string, string> = {};
+  for (const r of rows) map[r.key] = r.value;
+  const enabled = map.messageSyncPollingEnabled === 'true';
+  const raw = parseInt(map.messageSyncIntervalSec ?? '60', 10);
+  const intervalSec = Math.max(30, Math.min(7200, Number.isFinite(raw) ? raw : 60));
+  return { enabled, intervalSec };
+}
+
+/** 从设置页读取开关与间隔；关闭时每 5 秒重新读库以便无需重启即可开启 */
+function startBackgroundMessageSyncScheduler(): void {
+  const INITIAL_DELAY_MS = 10_000;
+  const RECHECK_WHEN_OFF_MS = 5_000;
+
+  const loop = async () => {
+    try {
+      const { enabled, intervalSec } = readMessageSyncPollingFromDb();
+      if (!enabled) {
+        setTimeout(loop, RECHECK_WHEN_OFF_MS);
+        return;
+      }
+      try {
+        console.log('[messageSync] Background sync: fetching monitored chats...');
+        const { results, totalInserted } = await syncAllMonitoredChats();
+        console.log(`[messageSync] Done. targets=${results.length} inserted=${totalInserted}`);
+        try {
+          await checkAndAutoReplyAll();
+        } catch (arErr) {
+          console.error('[messageSync] Auto-reply check error:', arErr);
+        }
+      } catch (err) {
+        console.error('[messageSync] Sync error:', err);
+      }
+      setTimeout(loop, intervalSec * 1000);
+    } catch (e) {
+      console.error('[messageSync] Scheduler error:', e);
+      setTimeout(loop, RECHECK_WHEN_OFF_MS);
+    }
+  };
+
+  console.log('[messageSync] Scheduler started (interval & switch from 设置)');
+  setTimeout(loop, INITIAL_DELAY_MS);
+}
 
 const app = express();
 
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:4173', 'http://localhost:5174', 'http://localhost:8000'],
+  origin: [
+    'http://localhost:5173',
+    'http://localhost:4173',
+    'http://localhost:5174',
+    'http://localhost:8000',
+    'http://localhost:8001',
+  ],
   credentials: true,
 }));
 app.use(express.json());
@@ -40,9 +97,6 @@ app.get('*', (req, res, next) => {
 // Run DB migrations on startup
 runMigrations();
 
-// Load auto-reply polling interval
-loadPollingInterval();
-
 // Routes
 app.use('/api/contacts', contactsRouter);
 app.use('/api/chats', chatsRouter);
@@ -57,6 +111,7 @@ app.use('/api/topics', (req, res, next) => {
   messagesRouter(req, res, next);
 });
 app.use('/api/settings', settingsRouter);
+app.use('/api/events', eventsRouter);
 app.use('/api/ai', aiRouter);
 app.use('/api/knowledge', knowledgeRouter);
 app.use('/api/templates', templatesRouter);
@@ -77,9 +132,10 @@ app.get('/api/monitor/status', (_req, res) => {
     `SELECT COUNT(*) as n FROM contacts WHERE contact_type = 'person'`
   ).get() as { n: number }).n;
 
+  const { enabled, intervalSec } = readMessageSyncPollingFromDb();
   res.json({
-    polling: true,
-    interval: 60,
+    message_sync_polling: enabled,
+    message_sync_interval_sec: enabled ? intervalSec : 0,
     contacts_monitored: contactsMonitored,
     chats_monitored: chatsMonitored,
   });
@@ -115,34 +171,11 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('  GET  /api/contacts/:id/summary       <- recent messages summary');
   console.log('  GET  /api/settings');
   console.log('  PUT  /api/settings');
+  console.log('  GET  /api/events                     <- list all events (admin table)');
   console.log('  POST /api/ai/analyze/:contactId      <- AI analyze single contact');
   console.log('  POST /api/ai/analyze-all             <- AI analyze all chats');
-  console.log('  GET  /api/monitor/status             <- polling monitor status');
+  console.log('  GET  /api/monitor/status             <- message sync polling status');
   console.log('  POST /api/auto-reply/trigger         <- manual auto-reply trigger');
 
-  // ─── Background polling: start after 10s, then every 60s ──────────────────
-  setTimeout(() => {
-    console.log('[polling] Starting background message polling (every 60s)');
-
-    const runPoll = async () => {
-      try {
-        console.log('[polling] Polling new messages for all monitored chats...');
-        const { results, totalInserted } = await syncAllMonitoredChats(20);
-        console.log(`[polling] Done. targets=${results.length} inserted=${totalInserted}`);
-
-        // Also run auto-reply check after sync
-        try {
-          await checkAndAutoReplyAll();
-        } catch (arErr) {
-          console.error('[polling] Auto-reply check error:', arErr);
-        }
-      } catch (err) {
-        console.error('[polling] Error during poll:', err);
-      }
-    };
-
-    // First immediate run after 10s delay
-    runPoll();
-    setInterval(runPoll, 60_000);
-  }, 10_000);
+  startBackgroundMessageSyncScheduler();
 });

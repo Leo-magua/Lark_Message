@@ -20,13 +20,13 @@ function upsertContact(user: LarkUser): void {
   const db = getDb();
   const row = toDbRow(user);
 
-  // Create new row with defaults if not exists (auto_reply=1, sync_mode='latest', sync_limit=20)
+  // Create new row with defaults if not exists (auto_reply=1, sync_mode='latest', sync_limit=NULL => use global default)
   db.prepare(`
     INSERT OR IGNORE INTO contacts
       (open_id, name, avatar_url, job_title, contact_type, tags, knows, last_talk, talk_count,
        auto_reply, sync_mode, sync_limit, synced_at)
     VALUES
-      (:open_id, :name, :avatar_url, :job_title, 'person', '[]', '[]', '', 0, 1, 'latest', 20, :synced_at)
+      (:open_id, :name, :avatar_url, :job_title, 'person', '[]', '[]', '', 0, 1, 'latest', NULL, :synced_at)
   `).run(row);
 
   // Update only Feishu-owned fields (never overwrite tags/knows)

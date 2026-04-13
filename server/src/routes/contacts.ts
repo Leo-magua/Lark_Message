@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { getDb } from '../db/connection.js';
 import { searchUsers, searchChats, getBestAvatar } from '../services/larkCli.js';
 import { syncAllContacts } from '../services/syncContacts.js';
+import { summarizeContactIntro } from '../services/contactIntroSummarize.js';
 
 const router = Router();
 
@@ -18,6 +19,7 @@ interface ContactRow {
   auto_reply?: number;
   sync_mode?: string;
   sync_limit?: number;
+  intro?: string | null;
 }
 
 /** Convert DB row → frontend Contact shape */
@@ -33,8 +35,12 @@ function rowToPerson(row: ContactRow) {
     lastTalk: row.last_talk,
     talkCount: row.talk_count,
     autoReply: Boolean(row.auto_reply),
-    syncMode: (row.sync_mode as 'latest' | 'full') || 'latest',
-    syncLimit: row.sync_limit || 20,
+    syncMode: row.sync_mode === 'full' || row.sync_mode === 'latest'
+      ? (row.sync_mode as 'latest' | 'full')
+      : undefined,
+    // `sync_limit` may be NULL => means "use global default" (frontend/server decide)
+    syncLimit: row.sync_limit === null || row.sync_limit === undefined ? undefined : row.sync_limit,
+    intro: row.intro ?? '',
   };
 }
 
@@ -57,6 +63,11 @@ router.get('/search', async (req, res) => {
   const type = (req.query.type as string | undefined) ?? 'person';
 
   try {
+    if (!q) {
+      res.json({ contacts: [] });
+      return;
+    }
+
     if (type === 'group') {
       const chats = await searchChats(q);
       const contacts = chats.map(c => ({
@@ -73,10 +84,6 @@ router.get('/search', async (req, res) => {
       }));
       res.json({ contacts });
     } else {
-      if (!q) {
-        res.json({ contacts: [] });
-        return;
-      }
       const users = await searchUsers(q, 20);
       const contacts = users.map(u => ({
         id: u.open_id,
@@ -133,7 +140,7 @@ router.post('/add', (req, res) => {
        auto_reply, sync_mode, sync_limit, synced_at)
     VALUES
       (?, ?, ?, ?, ?, '[]', '[]', '', 0, 1,
-       COALESCE(?, 'latest'), COALESCE(?, 20),
+       ?, ?,
        datetime('now'))
   `).run(
     id,
@@ -141,9 +148,39 @@ router.post('/add', (req, res) => {
     avatar ?? '',
     title ?? null,
     contact_type ?? 'person',
-    sync_mode || 'latest',  // param for COALESCE 1
-    sync_limit || 20        // param for COALESCE 2
+    sync_mode ?? null,
+    sync_limit ?? null
   );
+
+  // Keep `chats` table in sync for group-type address book entries (chat_id == open_id for groups)
+  if ((contact_type ?? 'person') === 'group') {
+    db.prepare(`
+      INSERT INTO chats (
+        chat_id, name, chat_type, avatar,
+        is_monitoring, auto_reply, has_alert,
+        sync_mode, sync_limit,
+        last_active_at, updated_at
+      ) VALUES (
+        ?, ?, 'group', ?,
+        0, 1, 0,
+        ?, ?,
+        datetime('now'), datetime('now')
+      )
+      ON CONFLICT(chat_id) DO UPDATE SET
+        name = excluded.name,
+        chat_type = excluded.chat_type,
+        avatar = excluded.avatar,
+        sync_mode = excluded.sync_mode,
+        sync_limit = excluded.sync_limit,
+        updated_at = datetime('now')
+    `).run(
+      id,
+      name,
+      avatar ?? '',
+      sync_mode ?? null,
+      sync_limit ?? null,
+    );
+  }
 
   res.json({ success: true });
 });
@@ -161,14 +198,15 @@ router.delete('/:id', (req, res) => {
 router.patch('/:id', (req, res) => {
   const db = getDb();
   const { id } = req.params;
-  const { tags, knows, lastTalk, talkCount, autoReply, syncMode, syncLimit } = req.body as {
+  const { tags, knows, lastTalk, talkCount, autoReply, syncMode, syncLimit, intro } = req.body as {
     tags?: string[];
     knows?: string[];
     lastTalk?: string;
     talkCount?: number;
     autoReply?: boolean;
-    syncMode?: 'latest' | 'full';
-    syncLimit?: number;
+    syncMode?: 'latest' | 'full' | null;
+    syncLimit?: number | null;
+    intro?: string;
   };
 
   const updates: string[] = [];
@@ -192,12 +230,24 @@ router.patch('/:id', (req, res) => {
     params.autoReply = autoReply ? 1 : 0;
   }
   if (syncMode !== undefined) {
-    updates.push('sync_mode = :syncMode');
-    params.syncMode = syncMode;
+    if (syncMode === null) {
+      updates.push('sync_mode = NULL');
+    } else {
+      updates.push('sync_mode = :syncMode');
+      params.syncMode = syncMode;
+    }
   }
   if (syncLimit !== undefined) {
-    updates.push('sync_limit = :syncLimit');
-    params.syncLimit = syncLimit;
+    if (syncLimit === null) {
+      updates.push('sync_limit = NULL');
+    } else {
+      updates.push('sync_limit = :syncLimit');
+      params.syncLimit = syncLimit;
+    }
+  }
+  if (intro !== undefined) {
+    updates.push('intro = :intro');
+    params.intro = intro;
   }
 
   if (updates.length === 0) {
@@ -227,6 +277,76 @@ router.patch('/:id', (req, res) => {
   res.json({ success: true });
 });
 
+// POST /api/contacts/:id/intro-ai — 根据已同步消息生成简介（须放在 /:id/summary 之前注册顺序无影响，路径不同）
+router.post('/:id/intro-ai', async (req, res) => {
+  const db = getDb();
+  const { id } = req.params;
+  const row = db
+    .prepare('SELECT name, contact_type FROM contacts WHERE open_id = ?')
+    .get(id) as { name: string; contact_type: string } | undefined;
+  if (!row) {
+    res.status(404).json({ success: false, error: 'Contact not found' });
+    return;
+  }
+  const contactType = row.contact_type === 'group' ? 'group' : 'person';
+  const result = await summarizeContactIntro({
+    contactId: id,
+    contactName: row.name,
+    contactType,
+  });
+  if ('error' in result) {
+    const code =
+      result.error === 'API key not configured'
+        ? 400
+        : result.error === 'No messages to summarize'
+          ? 400
+          : 502;
+    res.status(code).json({ success: false, error: result.error });
+    return;
+  }
+  res.json({ success: true, intro: result.intro });
+});
+
+// GET /api/contacts/:id/events — 该通讯录对象关联的 AI 事件（单聊写 source_contact_id；群可能写 source_chat_id 或 source_contact_id）
+router.get('/:id/events', (req, res) => {
+  const db = getDb();
+  const { id } = req.params;
+
+  const contact = db.prepare('SELECT 1 FROM contacts WHERE open_id = ?').get(id);
+  if (!contact) {
+    res.status(404).json({ error: 'Contact not found' });
+    return;
+  }
+
+  const rows = db
+    .prepare(
+      `
+    SELECT e.event_id, e.title, e.summary, COALESCE(e.speaker_highlights, '') AS speaker_highlights, e.occurred_at
+    FROM events e
+    WHERE e.source_contact_id = ? OR e.source_chat_id = ?
+    ORDER BY e.occurred_at DESC
+    LIMIT 200
+  `
+    )
+    .all(id, id) as Array<{
+    event_id: string;
+    title: string;
+    summary: string;
+    speaker_highlights: string;
+    occurred_at: string;
+  }>;
+
+  res.json({
+    events: rows.map(r => ({
+      id: r.event_id,
+      title: r.title,
+      summary: r.summary ?? '',
+      speaker_highlights: r.speaker_highlights ?? '',
+      occurred_at: r.occurred_at,
+    })),
+  });
+});
+
 // GET /api/contacts/:id/summary
 router.get('/:id/summary', (req, res) => {
   const db = getDb();
@@ -245,14 +365,14 @@ router.get('/:id/summary', (req, res) => {
     return;
   }
 
-  // Fetch last N messages (with IDs for deletion)
+  // Fetch last N messages（与同步存储一致：群 chat_id；P2P 可能 chat_id 或 sender_id）
   const messages = db.prepare(`
     SELECT id, sender_id, sender_name, content, created_at
     FROM messages
-    WHERE chat_id = ?
+    WHERE chat_id = ? OR sender_id = ?
     ORDER BY created_at DESC
     LIMIT 50
-  `).all(id) as Array<{
+  `).all(id, id) as Array<{
     id: number;
     sender_id: string;
     sender_name: string;

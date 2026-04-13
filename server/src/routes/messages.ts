@@ -28,10 +28,12 @@ interface EventRow {
   event_id: string;
   title: string;
   summary: string;
+  speaker_highlights: string | null;
   source_chat_id: string | null;
   source_contact_id: string | null;
   occurred_at: string;
   topic_ids: string | null;
+  timeline_hidden?: number | null;
 }
 
 // GET /api/messages?chatId=&limit=50&offset=0
@@ -59,13 +61,13 @@ router.get('/', (req, res) => {
 router.get('/timeline', (_req, res) => {
   const db = getDb();
 
-  // Fetch events with their associated topic_ids (comma-joined)
+  // 仅展示未从时间轴隐藏的事件（隐藏后仍可在「事件」管理页查看）
   const eventRows = db.prepare(`
-    SELECT e.event_id, e.title, e.summary, e.source_chat_id, e.source_contact_id, e.occurred_at,
-           GROUP_CONCAT(et.topic_id) as topic_ids
+    SELECT e.event_id, e.title, e.summary, COALESCE(e.speaker_highlights, '') AS speaker_highlights,
+           e.source_chat_id, e.source_contact_id, e.occurred_at,
+           (SELECT GROUP_CONCAT(et.topic_id) FROM event_topics et WHERE et.event_id = e.event_id) AS topic_ids
     FROM events e
-    LEFT JOIN event_topics et ON e.event_id = et.event_id
-    GROUP BY e.event_id
+    WHERE COALESCE(e.timeline_hidden, 0) = 0
     ORDER BY e.occurred_at DESC
     LIMIT 100
   `).all() as unknown as EventRow[];
@@ -79,6 +81,7 @@ router.get('/timeline', (_req, res) => {
     id: row.event_id,
     title: row.title,
     summary: row.summary ?? '',
+    speaker_highlights: row.speaker_highlights ?? '',
     topics: row.topic_ids ? row.topic_ids.split(',').filter(Boolean) : [],
     occurred_at: row.occurred_at,
     source_contact_id: row.source_contact_id ?? undefined,
@@ -144,9 +147,10 @@ router.patch('/topics/:topicId', (req, res) => {
 
 // POST /api/messages/sync - sync messages for all monitored chats
 router.post('/sync', async (req, res) => {
-  const { maxPerChat = 50 } = (req.body ?? {}) as { maxPerChat?: number };
+  const { fullSyncCap } = (req.body ?? {}) as { fullSyncCap?: number };
   try {
-    const result = await syncAllMonitoredChats(maxPerChat);
+    const cap = fullSyncCap === undefined ? undefined : Number(fullSyncCap);
+    const result = await syncAllMonitoredChats(Number.isFinite(cap) ? { fullSyncCap: cap } : undefined);
     res.json({
       success: true,
       totalInserted: result.totalInserted,

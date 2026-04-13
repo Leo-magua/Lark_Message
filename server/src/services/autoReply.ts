@@ -9,7 +9,7 @@ const LARK_CLI = IS_WIN
   : 'lark-cli';
 
 /** Minimum gap between auto-replies to the same chat (ms) */
-let MIN_REPLY_INTERVAL_MS = 5 * 60 * 1000; // default 5 minutes
+const MIN_REPLY_INTERVAL_MS = 5 * 60 * 1000;
 
 /** In-memory tracking of last auto-reply timestamp per chatId */
 const lastRepliedAt: Map<string, number> = new Map();
@@ -20,14 +20,6 @@ function getSetting(key: string): string {
   const db = getDb();
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined;
   return row?.value ?? '';
-}
-
-// Load polling interval from settings
-export function loadPollingInterval(): void {
-  const interval = parseInt(getSetting('pollingInterval') || '60', 10);
-  // Convert seconds to milliseconds
-  MIN_REPLY_INTERVAL_MS = interval * 60 * 1000;
-  console.log(`[autoReply] Polling interval set to ${interval}s (cooldown: ${MIN_REPLY_INTERVAL_MS / 60000}min)`);
 }
 
 // Auto-reply channel config
@@ -198,14 +190,6 @@ interface ContactRow {
 }
 
 export async function checkAndAutoReplyAll(): Promise<void> {
-  const globalEnabled = getSetting('autoReplyEnabled');
-  if (globalEnabled !== 'true') {
-    console.log('[autoReply] Auto-reply globally disabled, skipping');
-    return;
-  }
-
-  loadPollingInterval();
-
   const db = getDb();
 
   const autoReplyChats = db.prepare(
