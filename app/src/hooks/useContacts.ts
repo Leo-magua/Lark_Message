@@ -18,6 +18,8 @@ export interface UseContactsReturn {
     contact_type: 'person' | 'group';
   }) => Promise<void>;
   removeContact: (id: string) => Promise<void>;
+  patchContact: (id: string, data: Partial<Pick<Person, 'tags' | 'knows' | 'lastTalk' | 'talkCount' | 'autoReply' | 'syncMode' | 'syncLimit'>>) => Promise<void>;
+  refresh: () => Promise<void>;
 }
 
 export function useContacts(): UseContactsReturn {
@@ -75,6 +77,14 @@ export function useContacts(): UseContactsReturn {
     setContacts(prev => prev.filter(c => c.id !== id));
   }, []);
 
+  const patchContact = useCallback(async (id: string, data: Partial<Pick<Person, 'tags' | 'knows' | 'lastTalk' | 'talkCount' | 'autoReply' | 'syncMode' | 'syncLimit'>>) => {
+    await api.contacts.patch(id, data);
+    // Optimistic update
+    setContacts(prev => prev.map(c =>
+      c.id === id ? { ...c, ...data } : c
+    ));
+  }, []);
+
   return {
     contacts,
     status,
@@ -83,5 +93,7 @@ export function useContacts(): UseContactsReturn {
     searchLark,
     addContact,
     removeContact,
+    patchContact,
+    refresh: loadContacts,
   };
 }

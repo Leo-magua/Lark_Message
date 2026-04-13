@@ -127,22 +127,29 @@ export async function analyzeMessages(
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const data = await response.json() as any;
-    rawJson = data?.choices?.[0]?.message?.content ?? '';
+    // StepFun models may put output in 'reasoning' field for thinking models
+    const message = data?.choices?.[0]?.message ?? {};
+    rawJson = message.content || message.reasoning || '';
   } catch (err) {
     console.error('[aiAnalyze] Fetch error:', err);
     return { error: `Network error: ${String(err)}` };
   }
 
-  // Parse JSON from LLM — strip possible markdown code fences
+  // Parse JSON from LLM — strip markdown and extract JSON object
   let result: AnalyzeResult;
   try {
-    const cleaned = rawJson
-      .replace(/^```(?:json)?\s*/i, '')
-      .replace(/```\s*$/i, '')
-      .trim();
+    // Remove markdown code fences
+    let cleaned = rawJson.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    
+    // Try to find JSON object in the text (in case model adds explanatory text)
+    const jsonMatch = cleaned.match(/\{.*\}/s);
+    if (jsonMatch) {
+      cleaned = jsonMatch[0];
+    }
+
     result = JSON.parse(cleaned) as AnalyzeResult;
   } catch (err) {
-    console.error('[aiAnalyze] JSON parse error. Raw:', rawJson, err);
+    console.error('[aiAnalyze] JSON parse error. Raw:', rawJson.slice(0, 200), err);
     return { error: 'LLM returned non-JSON response' };
   }
 

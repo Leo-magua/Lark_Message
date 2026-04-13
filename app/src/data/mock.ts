@@ -11,6 +11,7 @@ export const mockPeople: Person[] = [
     knows: ['负责Q2产品规划', '关注用户体验', '周五前要给反馈'],
     lastTalk: '10:30',
     talkCount: 23,
+    autoReply: false,
   },
   {
     id: 'p2',
@@ -22,6 +23,7 @@ export const mockPeople: Person[] = [
     knows: ['主推GraphQL方案', '关注性能指标', '周二有技术分享'],
     lastTalk: '昨天',
     talkCount: 45,
+    autoReply: false,
   },
   {
     id: 'p3',
@@ -33,6 +35,7 @@ export const mockPeople: Person[] = [
     knows: ['负责新版视觉', '对细节要求高'],
     lastTalk: '周一',
     talkCount: 12,
+    autoReply: false,
   },
 ];
 

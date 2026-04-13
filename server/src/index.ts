@@ -1,3 +1,4 @@
+import path from 'path';
 import express from 'express';
 import cors from 'cors';
 import { runMigrations } from './db/schema.js';
@@ -7,21 +8,40 @@ import chatsRouter from './routes/chats.js';
 import messagesRouter from './routes/messages.js';
 import settingsRouter from './routes/settings.js';
 import aiRouter from './routes/ai.js';
+import knowledgeRouter from './routes/knowledge.js';
+import templatesRouter from './routes/templates.js';
+import autoReplyConfigRouter from './routes/autoReplyConfig.js';
 import { syncAllMonitoredChats } from './services/syncMessages.js';
-import { checkAndAutoReplyAll } from './services/autoReply.js';
+import { checkAndAutoReplyAll, loadPollingInterval } from './services/autoReply.js';
 
-const PORT = Number(process.env.PORT ?? 3001);
+const PORT = Number(process.env.PORT ?? 8001);
 
 const app = express();
 
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:4173', 'http://localhost:5174'],
+  origin: ['http://localhost:5173', 'http://localhost:4173', 'http://localhost:5174', 'http://localhost:8000'],
   credentials: true,
 }));
 app.use(express.json());
 
+// ─── Static files (frontend build) ───────────────────────────────────────────
+const frontendDist = path.join(import.meta.dirname, '..', '..', 'app', 'dist');
+app.use(express.static(frontendDist));
+
+// SPA fallback: serve index.html for any non-API route
+app.get('*', (req, res, next) => {
+  if (!req.path.startsWith('/api/')) {
+    res.sendFile(path.join(frontendDist, 'index.html'));
+  } else {
+    next(); // Continue to let Express handle 404 for unknown API routes
+  }
+});
+
 // Run DB migrations on startup
 runMigrations();
+
+// Load auto-reply polling interval
+loadPollingInterval();
 
 // Routes
 app.use('/api/contacts', contactsRouter);
@@ -38,6 +58,9 @@ app.use('/api/topics', (req, res, next) => {
 });
 app.use('/api/settings', settingsRouter);
 app.use('/api/ai', aiRouter);
+app.use('/api/knowledge', knowledgeRouter);
+app.use('/api/templates', templatesRouter);
+app.use('/api/auto-reply', autoReplyConfigRouter);
 
 // Health check
 app.get('/api/health', (_req, res) => {
@@ -72,8 +95,9 @@ app.post('/api/auto-reply/trigger', async (_req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`[server] Listening on http://localhost:${PORT}`);
+  console.log(`[server] Serving frontend from ${frontendDist}`);
   console.log('[server] Routes:');
   console.log('  GET  /api/health');
   console.log('  GET  /api/chats');

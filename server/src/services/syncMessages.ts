@@ -41,7 +41,7 @@ interface LarkMessageListResponse {
   ok?: boolean;
   code?: number;
   data: {
-    items: LarkMessage[];
+    messages: LarkMessage[];
     has_more: boolean;
     page_token?: string;
   };
@@ -70,16 +70,19 @@ async function runLarkCli(args: string[]): Promise<unknown> {
  * Extract plain text from a Feishu message body.content JSON.
  * Handles text, post (rich text), and falls back to raw JSON for others.
  */
-function extractText(msgType: string, bodyContent: string): string {
-  try {
-    const parsed = JSON.parse(bodyContent);
+function extractText(msg: any): string {
+  const msgType = msg.msg_type || 'unknown';
+  const content = msg.content;
 
-    if (msgType === 'text') {
-      return (parsed as { text?: string }).text ?? '';
-    }
+  // For text messages, content is already plain text
+  if (msgType === 'text') {
+    return (typeof content === 'string') ? content : '';
+  }
 
-    if (msgType === 'post') {
-      // Rich text: { zh_cn: { title, content: [[{tag,text},...]] } }
+  // For post (rich text), content is JSON string
+  if (msgType === 'post') {
+    try {
+      const parsed = typeof content === 'string' ? JSON.parse(content) : content;
       const lang = (parsed as Record<string, { title?: string; content?: Array<Array<{ tag: string; text?: string }>> }>);
       const doc = lang.zh_cn ?? lang.en_us ?? Object.values(lang)[0];
       if (!doc) return '[富文本]';
@@ -88,26 +91,39 @@ function extractText(msgType: string, bodyContent: string): string {
       );
       const title = doc.title ? `【${doc.title}】` : '';
       return (title + lines.join('\n')).trim() || '[富文本]';
+    } catch {
+      return '[富文本]';
     }
-
-    if (msgType === 'image') return '[图片]';
-    if (msgType === 'file') return '[文件]';
-    if (msgType === 'audio') return '[音频]';
-    if (msgType === 'video') return '[视频]';
-    if (msgType === 'sticker') return '[表情包]';
-    if (msgType === 'system') {
-      return (parsed as { text?: string }).text ?? '[系统消息]';
-    }
-
-    return `[${msgType}]`;
-  } catch {
-    return bodyContent.slice(0, 200);
   }
+
+  if (msgType === 'image') return '[图片]';
+  if (msgType === 'file') return '[文件]';
+  if (msgType === 'audio') return '[音频]';
+  if (msgType === 'video') return '[视频]';
+  if (msgType === 'sticker') return '[表情包]';
+  if (msgType === 'system') {
+    try {
+      const parsed = typeof content === 'string' ? JSON.parse(content) : content;
+      return (parsed as { text?: string }).text ?? '[系统消息]';
+    } catch {
+      return '[系统消息]';
+    }
+  }
+
+  return `[${msgType}]`;
 }
 
-/** Convert epoch-ms string to ISO 8601 */
-function epochMsToIso(epochMs: string): string {
-  return new Date(Number(epochMs)).toISOString();
+function epochMsToIso(timeStr: string): string {
+  // lark-cli returns either epoch ms string or formatted datetime like "2026-04-10 17:43"
+  const ts = Number(timeStr);
+  if (!isNaN(ts) && ts > 1_000_000_000_000) {
+    // Epoch milliseconds
+    return new Date(ts).toISOString();
+  }
+  // Assume it's already a formatted date string; return as-is or convert to ISO if possible
+  // For simplicity, return the string wrapped as ISO-like (will be stored as text)
+  // Actually SQLite stores as TEXT, we can store the original string
+  return timeStr;
 }
 
 // ─── Core fetch function ──────────────────────────────────────────────────────
@@ -138,6 +154,7 @@ async function fetchChatMessages(
         '--page-size', String(pageSize),
         '--sort', 'desc',
         '--format', 'json',
+        '--as', 'user',
       ];
     } else {
       args = [
@@ -146,6 +163,7 @@ async function fetchChatMessages(
         '--page-size', String(pageSize),
         '--sort', 'desc',
         '--format', 'json',
+        '--as', 'user',
       ];
     }
     if (pageToken) args.push('--page-token', pageToken);
@@ -159,7 +177,7 @@ async function fetchChatMessages(
     }
 
     const resp = result as LarkMessageListResponse;
-    const items = resp.data?.items ?? [];
+    const items = resp.data?.messages ?? [];
     allItems.push(...items);
 
     if (!resp.data?.has_more || !resp.data?.page_token) break;
@@ -171,9 +189,9 @@ async function fetchChatMessages(
 
 // ─── Upsert helpers ───────────────────────────────────────────────────────────
 
-function upsertMessage(msg: LarkMessage, senderId: string, senderName: string): void {
+function upsertMessage(msg: any, senderId: string, senderName: string, storeChatId: string): void {
   const db = getDb();
-  const content = extractText(msg.msg_type, msg.body.content);
+  const content = extractText(msg);
   const createdAt = epochMsToIso(msg.create_time);
 
   db.prepare(`
@@ -184,7 +202,7 @@ function upsertMessage(msg: LarkMessage, senderId: string, senderName: string): 
       (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     msg.message_id,
-    msg.chat_id,
+    storeChatId,
     senderId,
     senderName,
     content,
@@ -196,7 +214,7 @@ function upsertMessage(msg: LarkMessage, senderId: string, senderName: string): 
   );
 }
 
-function getSenderName(msg: LarkMessage): { senderId: string; senderName: string } {
+function getSenderName(msg: any): { senderId: string; senderName: string } {
   const senderId = msg.sender?.id ?? '';
   // Try to look up name from contacts table
   const db = getDb();
@@ -239,12 +257,12 @@ export async function syncChatMessages(
 
       const { senderId, senderName } = getSenderName(msg);
 
-      // For P2P, override chat_id in message with the contact's open_id so messages are grouped
-      const storeChatId = mode === 'p2p' && openId ? openId : msg.chat_id;
-      const msgToStore = mode === 'p2p' && openId ? { ...msg, chat_id: storeChatId } : msg;
+      // For P2P mode, store messages under the contact's open_id; for group chats use the chat_id
+      const storeChatId = mode === 'p2p' && openId ? openId : chatId;
+      const msgToStore = msg;
 
       const before = (db.prepare('SELECT COUNT(*) as n FROM messages WHERE message_id = ?').get(msg.message_id) as { n: number }).n;
-      upsertMessage(msgToStore, senderId, senderName);
+      upsertMessage(msgToStore, senderId, senderName, storeChatId);
       const after = (db.prepare('SELECT COUNT(*) as n FROM messages WHERE message_id = ?').get(msg.message_id) as { n: number }).n;
 
       if (after > before) inserted++;
@@ -252,12 +270,14 @@ export async function syncChatMessages(
 
     // Update chat last_active_at based on newest message (only for group chats)
     if (messages.length > 0 && mode === 'group') {
-      const newest = messages.reduce((a, b) =>
-        Number(a.create_time) > Number(b.create_time) ? a : b
-      );
-      db.prepare(`
-        UPDATE chats SET last_active_at = ? WHERE chat_id = ?
-      `).run(epochMsToIso(newest.create_time), chatId);
+      const newest = messages.reduce((a, b) => {
+        const ta = new Date(a.create_time).getTime();
+        const tb = new Date(b.create_time).getTime();
+        return ta > tb ? a : b;
+      });
+      db.prepare(
+        `UPDATE chats SET last_active_at = ? WHERE chat_id = ?`
+      ).run(newest.create_time, chatId);
     }
 
     console.log(`[syncMessages] ${effectiveChatId}: fetched=${messages.length} inserted=${inserted}`);

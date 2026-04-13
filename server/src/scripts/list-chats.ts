@@ -17,7 +17,7 @@ async function runLarkCli(args: string[]): Promise<unknown> {
 (async () => {
   console.log('正在从飞书获取群列表...\n');
   try {
-    const result = await runLarkCli(['im', 'chats', 'list', '--format', 'json', '--page-all']) as {
+    const result = await runLarkCli(['im', 'chats', 'list', '--format', 'json', '--page-all', '--as', 'user']) as {
       ok: boolean;
       data: { items: Array<{ chat_id: string; name: string; chat_type: string }> };
     };

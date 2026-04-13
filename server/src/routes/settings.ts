@@ -14,6 +14,7 @@ function getAllSettings() {
     kimiCommand: map.kimiCommand ?? '请帮我分析这段对话的重点',
     autoReplyEnabled: map.autoReplyEnabled === 'true',
     modelId: map.modelId ?? 'step-3.5-flash-2603',
+    pollingInterval: parseInt(map.pollingInterval || '60', 10), // seconds
   };
 }
 
@@ -25,12 +26,13 @@ router.get('/', (_req, res) => {
 // PUT /api/settings
 router.put('/', (req, res) => {
   const db = getDb();
-  const { openaiKey, openaiUrl, kimiCommand, autoReplyEnabled, modelId } = req.body as {
+  const { openaiKey, openaiUrl, kimiCommand, autoReplyEnabled, modelId, pollingInterval } = req.body as {
     openaiKey?: string;
     openaiUrl?: string;
     kimiCommand?: string;
     autoReplyEnabled?: boolean;
     modelId?: string;
+    pollingInterval?: number;
   };
 
   if (openaiKey !== undefined)
@@ -41,8 +43,8 @@ router.put('/', (req, res) => {
     db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('kimiCommand', kimiCommand);
   if (autoReplyEnabled !== undefined)
     db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('autoReplyEnabled', String(autoReplyEnabled));
-  if (modelId !== undefined)
-    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('modelId', modelId);
+  if (pollingInterval !== undefined)
+    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('pollingInterval', String(pollingInterval));
 
   res.json(getAllSettings());
 });

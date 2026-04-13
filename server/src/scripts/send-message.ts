@@ -23,6 +23,7 @@ if (!chatId || !text) {
       '--msg-type', 'text',
       '--content', JSON.stringify({ text }),
       '--format', 'json',
+      '--as', 'user',
     ], { shell: IS_WIN, timeout: 15000 });
 
     const result = JSON.parse(stdout) as { ok: boolean; data?: { message_id: string } };

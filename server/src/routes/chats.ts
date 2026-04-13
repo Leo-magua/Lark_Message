@@ -16,6 +16,8 @@ interface ChatRow {
   last_summary: string | null;
   last_active_at: string | null;
   updated_at: string | null;
+  sync_mode?: string;
+  sync_limit?: number;
 }
 
 function rowToChannel(row: ChatRow) {
@@ -31,6 +33,8 @@ function rowToChannel(row: ChatRow) {
     hasAlert: Boolean(row.has_alert),
     summary: row.last_summary ?? '',
     lastActive,
+    syncMode: (row.sync_mode as 'latest' | 'full') || 'latest',
+    syncLimit: row.sync_limit || 20,
   };
 }
 
@@ -60,10 +64,12 @@ router.get('/', (_req, res) => {
 router.put('/:chatId', (req, res) => {
   const db = getDb();
   const { chatId } = req.params;
-  const { isMonitoring, autoReply, hasAlert } = req.body as {
+  const { isMonitoring, autoReply, hasAlert, syncMode, syncLimit } = req.body as {
     isMonitoring?: boolean;
     autoReply?: boolean;
     hasAlert?: boolean;
+    syncMode?: 'latest' | 'full';
+    syncLimit?: number;
   };
 
   const updates: string[] = ["updated_at = datetime('now')"];
@@ -82,8 +88,29 @@ router.put('/:chatId', (req, res) => {
     updates.push('has_alert = :hasAlert');
     params.hasAlert = hasAlert ? 1 : 0;
   }
+  if (syncMode !== undefined) {
+    updates.push('sync_mode = :syncMode');
+    params.syncMode = syncMode;
+  }
+  if (syncLimit !== undefined) {
+    updates.push('sync_limit = :syncLimit');
+    params.syncLimit = syncLimit;
+  }
 
   db.prepare(`UPDATE chats SET ${updates.join(', ')} WHERE chat_id = :chat_id`).run(params);
+
+  // Sync auto_reply config: ensure config exists when auto_reply=1, remove when=0
+  if (autoReply !== undefined) {
+    if (autoReply) {
+      db.prepare(`
+        INSERT OR IGNORE INTO auto_reply_config (channel_type, channel_id, template_id, knowledge_tags, custom_context, enabled)
+        VALUES ('group', ?, NULL, '[]', '', 1)
+      `).run(chatId);
+    } else {
+      db.prepare("DELETE FROM auto_reply_config WHERE channel_type = 'group' AND channel_id = ?").run(chatId);
+    }
+  }
+
   const row = db.prepare('SELECT * FROM chats WHERE chat_id = ?').get(chatId) as ChatRow | undefined;
   if (!row) { res.status(404).json({ error: 'Chat not found' }); return; }
   res.json(rowToChannel(row));

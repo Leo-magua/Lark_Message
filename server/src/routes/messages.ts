@@ -182,4 +182,25 @@ router.post('/sync-contact/:contactId', async (req, res) => {
   }
 });
 
+// DELETE /api/messages/:id - delete a single message
+router.delete('/:id', (req, res) => {
+  const db = getDb();
+  const { id } = req.params;
+  db.prepare('DELETE FROM messages WHERE id = ?').run(Number(id));
+  res.json({ success: true });
+});
+
+// POST /api/messages/bulk-delete - delete multiple messages by IDs
+router.post('/bulk-delete', (req, res) => {
+  const db = getDb();
+  const { ids } = req.body as { ids: number[] };
+  if (!Array.isArray(ids) || ids.length === 0) {
+    res.status(400).json({ error: 'ids array is required' });
+    return;
+  }
+  const placeholders = ids.map(() => '?').join(',');
+  db.prepare(`DELETE FROM messages WHERE id IN (${placeholders})`).run(...ids);
+  res.json({ success: true, deleted: ids.length });
+});
+
 export default router;

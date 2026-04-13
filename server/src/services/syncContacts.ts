@@ -20,10 +20,13 @@ function upsertContact(user: LarkUser): void {
   const db = getDb();
   const row = toDbRow(user);
 
-  // Create new row with defaults if not exists
+  // Create new row with defaults if not exists (auto_reply=1, sync_mode='latest', sync_limit=20)
   db.prepare(`
-    INSERT OR IGNORE INTO contacts (open_id, name, avatar_url, job_title, synced_at)
-    VALUES (:open_id, :name, :avatar_url, :job_title, :synced_at)
+    INSERT OR IGNORE INTO contacts
+      (open_id, name, avatar_url, job_title, contact_type, tags, knows, last_talk, talk_count,
+       auto_reply, sync_mode, sync_limit, synced_at)
+    VALUES
+      (:open_id, :name, :avatar_url, :job_title, 'person', '[]', '[]', '', 0, 1, 'latest', 20, :synced_at)
   `).run(row);
 
   // Update only Feishu-owned fields (never overwrite tags/knows)
@@ -35,6 +38,13 @@ function upsertContact(user: LarkUser): void {
         synced_at  = :synced_at
     WHERE open_id  = :open_id
   `).run(row);
+
+  // Ensure auto-reply config exists for contacts with auto_reply=1 (new default)
+  // This creates a default config so the contact appears in auto-reply channels immediately
+  db.prepare(`
+    INSERT OR IGNORE INTO auto_reply_config (channel_type, channel_id, template_id, knowledge_tags, custom_context, enabled)
+    VALUES ('person', :open_id, NULL, '[]', '', 1)
+  `).run({ open_id: row.open_id });
 }
 
 export interface SyncResult {

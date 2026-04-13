@@ -9,6 +9,9 @@ export interface Person {
   knows: string[];
   lastTalk: string;
   talkCount: number;
+  autoReply: boolean;
+  syncMode?: 'latest' | 'full';
+  syncLimit?: number;
 }
 
 export interface Channel {
@@ -22,6 +25,50 @@ export interface Channel {
   hasAlert: boolean;
   summary: string;
   autoReply: boolean;
+  syncMode?: 'latest' | 'full';
+  syncLimit?: number;
+}
+
+/** Auto-reply channel enriched with config */
+export interface AutoReplyChannel extends Channel {
+  enabled: boolean;           // from auto_reply_config.enabled
+  config?: {
+    id: number;
+    channelType: 'person' | 'group';
+    channelId: string;
+    templateId: number | null;
+    knowledgeTags: string[];
+    customContext: string;
+    enabled: number;
+    updatedAt: string;
+  } | null;
+}
+
+export interface Knowledge {
+  id: number;
+  title: string;
+  content: string;
+  tags: string[];
+  createdAt: string;
+}
+
+export interface Template {
+  id: number;
+  name: string;
+  systemPrompt: string;
+  description?: string;
+  isDefault: boolean;
+  createdAt: string;
+}
+
+export interface AutoReplyConfig {
+  id: number;
+  channelType: 'person' | 'group';
+  channelId: string;
+  templateId: number | null;
+  knowledgeTags: string[];
+  customContext: string;
+  enabled: number; // 0/1
 }
 
 export interface Topic {
@@ -59,3 +106,21 @@ export const topicColors = [
   { bg: 'bg-pink-100', text: 'text-pink-700', border: 'border-pink-200', dot: 'bg-pink-500' },
   { bg: 'bg-cyan-100', text: 'text-cyan-700', border: 'border-cyan-200', dot: 'bg-cyan-500' },
 ];
+
+/** Single message in contact summary (with id for deletion) */
+export interface ContactMessage {
+  id: number;
+  sender: string;
+  content: string;
+  time: string;
+}
+
+/** Contact summary with recent messages */
+export interface ContactSummary {
+  contact_id: string;
+  name: string;
+  avatar: string;
+  contact_type: string;
+  messages: ContactMessage[];
+  last_message_at: string;
+}

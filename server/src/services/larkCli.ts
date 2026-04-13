@@ -33,7 +33,7 @@ async function runLarkCli(args: string[]): Promise<unknown> {
 /** Get the currently authenticated user */
 export async function getCurrentUser(): Promise<LarkUser> {
   const result = await runLarkCli([
-    'contact', '+get-user', '--format', 'json',
+    'contact', '+get-user', '--format', 'json', '--as', 'user',
   ]) as LarkGetUserResponse;
   return result.data.user;
 }
@@ -45,6 +45,7 @@ export async function searchUsers(query: string, pageSize = 50): Promise<LarkUse
     '--query', query,
     '--page-size', String(pageSize),
     '--format', 'json',
+    '--as', 'user',
   ]) as LarkSearchUsersResponse;
   return result.data?.users ?? [];
 }
@@ -56,6 +57,7 @@ export async function getUserById(openId: string): Promise<LarkUser> {
     '--user-id', openId,
     '--user-id-type', 'open_id',
     '--format', 'json',
+    '--as', 'user',
   ]) as LarkGetUserResponse;
   return result.data.user;
 }
@@ -97,6 +99,7 @@ export async function searchChats(
   const result = await runLarkCli([
     'im', 'chats', 'list',
     '--format', 'json',
+    '--as', 'user',
   ]) as LarkChatsListResponse;
 
   const items = result.data?.items ?? [];
@@ -116,5 +119,6 @@ export async function getP2PMessages(openId: string, pageSize = 50): Promise<unk
     '--sort', 'desc',
     '--page-size', String(pageSize),
     '--format', 'json',
+    '--as', 'user',
   ]);
 }

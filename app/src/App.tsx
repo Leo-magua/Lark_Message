@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type Dispatch, type SetStateAction } from 'react';
 import {
   Bot,
   Clock,
@@ -22,9 +22,11 @@ import {
   Tag,
   RefreshCw,
   Loader2,
+  ToggleLeft,
+  ToggleRight,
 } from 'lucide-react';
 import { topicColors } from '@/types';
-import type { Person } from '@/types';
+import type { Person, AutoReplyChannel, Template } from '@/types';
 import { useContacts } from '@/hooks/useContacts';
 import { useChats } from '@/hooks/useChats';
 import { useSettings } from '@/hooks/useSettings';
@@ -49,10 +51,9 @@ function formatEventTime(isoStr: string): string {
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>('status');
   const [alertExpanded, setAlertExpanded] = useState(true);
-  const [autoReplyExpanded, setAutoReplyExpanded] = useState(true);
 
   // Real data hooks
-  const { channels, toggleAutoReply } = useChats();
+  const { channels } = useChats();
   const { settings, setSettings, status: settingsStatus, saved: settingsSaved, saveSettings } = useSettings();
   const {
     topics, events: _events, visibleEvents,
@@ -70,6 +71,8 @@ function App() {
     searchLark,
     addContact,
     removeContact,
+    patchContact,
+    refresh: refreshContacts,
   } = useContacts();
 
   // Modals
@@ -86,8 +89,66 @@ function App() {
   const [selectedContact, setSelectedContact] = useState<Person | null>(null);
 
   const monitoringChannels = channels.filter(c => c.isMonitoring);
-  const autoReplyChannels = channels.filter(c => c.autoReply);
   const alertChannels = monitoringChannels.filter(c => c.hasAlert);
+
+  // Auto-reply channels (independent fetch)
+  const [autoReplyChannels, setAutoReplyChannels] = useState<AutoReplyChannel[]>([]);
+  const [loadingAutoReplyChannels, setLoadingAutoReplyChannels] = useState(true);
+  const [_templates, setTemplates] = useState<Template[]>([]);
+  const [selectedAutoReplyChannel, setSelectedAutoReplyChannel] = useState<AutoReplyChannel | null>(null);
+
+  useEffect(() => {
+    loadAutoReplyChannels();
+    loadTemplates();
+    // Auto-refresh every 60s
+    const interval = setInterval(loadAutoReplyChannels, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const loadAutoReplyChannels = async () => {
+    setLoadingAutoReplyChannels(true);
+    try {
+      const data = await api.autoReply.getChannels();
+      setAutoReplyChannels(data.channels);
+    } catch (err) {
+      console.error('Failed to load auto-reply channels:', err);
+    } finally {
+      setLoadingAutoReplyChannels(false);
+    }
+  };
+
+  const loadTemplates = async () => {
+    try {
+      const data = await api.templates.list();
+      setTemplates(data.templates);
+    } catch (err) {
+      console.error('Failed to load templates:', err);
+    }
+  };
+
+  const handleToggleStatusChannel = async (channelId: string) => {
+    try {
+      await api.autoReply.toggle(channelId);
+      await loadAutoReplyChannels();
+    } catch (err) {
+      alert('操作失败: ' + err);
+    }
+  };
+
+  const handleToggleAutoReplyChannelMode = async (channel: AutoReplyChannel) => {
+    const next = !channel.enabled;
+    try {
+      await api.autoReply.setConfig(channel.type, channel.id, {
+        templateId: channel.config?.templateId ?? null,
+        knowledgeTags: channel.config?.knowledgeTags ?? [],
+        customContext: channel.config?.customContext ?? '',
+        enabled: next,
+      });
+      await loadAutoReplyChannels();
+    } catch (err) {
+      alert('操作失败: ' + err);
+    }
+  };
 
   // Topic operations
   const addTopic = () => {
@@ -98,113 +159,273 @@ function App() {
   };
 
   // ============ Status Page ============
-  const StatusPage = () => (
-    <div className="space-y-4">
-      {/* Status Cards */}
-      <div className="grid grid-cols-3 gap-3">
-        <div className="bg-white rounded-2xl p-3 border border-neutral-200">
-          <div className="flex items-center gap-1.5 mb-1.5">
-            <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
-            <span className="text-[10px] text-neutral-500">运行中</span>
-          </div>
-          <p className="text-xl font-bold text-neutral-900">{autoReplyChannels.length}</p>
-        </div>
-        <div className="bg-white rounded-2xl p-3 border border-neutral-200">
-          <div className="flex items-center gap-1.5 mb-1.5">
-            <Eye className="w-3 h-3 text-amber-500" />
-            <span className="text-[10px] text-neutral-500">关注</span>
-          </div>
-          <p className="text-xl font-bold text-neutral-900">{alertChannels.length}</p>
-        </div>
-        <div className="bg-white rounded-2xl p-3 border border-neutral-200">
-          <div className="flex items-center gap-1.5 mb-1.5">
-            <Tag className="w-3 h-3 text-blue-500" />
-            <span className="text-[10px] text-neutral-500">主题</span>
-          </div>
-          <p className="text-xl font-bold text-neutral-900">{topics.filter(t => t.visible).length}/{topics.length}</p>
-        </div>
-      </div>
+  const StatusPage = () => {
+    // 全局自动回复模式状态（独立于单个通道，持久化到 localStorage）
+    const [autoReplyModeEnabled, setAutoReplyModeEnabled] = useState<boolean>(() => {
+      const saved = localStorage.getItem('autoReplyModeEnabled');
+      return saved !== null ? JSON.parse(saved) : true;
+    });
 
-      {/* Alert Section */}
-      {alertChannels.length > 0 && (
-        <div>
-          <button 
-            onClick={() => setAlertExpanded(!alertExpanded)}
-            className="w-full flex items-center justify-between py-3 hover:opacity-70 transition-opacity"
-          >
+    // 全局自动回复模式切换
+    const handleToggleAutoReplyMode = () => {
+      const newValue = !autoReplyModeEnabled;
+      setAutoReplyModeEnabled(newValue);
+      localStorage.setItem('autoReplyModeEnabled', JSON.stringify(newValue));
+      // TODO: 调用后端接口设置全局自动回复模式
+      console.log('全局自动回复模式切换为：', newValue ? '开启' : '关闭');
+    };
+
+    return (
+      <div className="space-y-4">
+        {/* Status Cards */}
+        <div className="grid grid-cols-3 gap-3">
+          <div className="bg-white rounded-2xl p-3 border border-neutral-200">
+            <div className="flex items-center gap-1.5 mb-1.5">
+              <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
+              <span className="text-[10px] text-neutral-500">运行中</span>
+            </div>
+            <p className="text-xl font-bold text-neutral-900">{autoReplyChannels.length}</p>
+          </div>
+          <div className="bg-white rounded-2xl p-3 border border-neutral-200">
+            <div className="flex items-center gap-1.5 mb-1.5">
+              <Eye className="w-3 h-3 text-amber-500" />
+              <span className="text-[10px] text-neutral-500">关注</span>
+            </div>
+            <p className="text-xl font-bold text-neutral-900">{alertChannels.length}</p>
+          </div>
+          <div className="bg-white rounded-2xl p-3 border border-neutral-200">
+            <div className="flex items-center gap-1.5 mb-1.5">
+              <Tag className="w-3 h-3 text-blue-500" />
+              <span className="text-[10px] text-neutral-500">主题</span>
+            </div>
+            <p className="text-xl font-bold text-neutral-900">{topics.filter(t => t.visible).length}/{topics.length}</p>
+          </div>
+        </div>
+
+        {/* Alert Section */}
+        {alertChannels.length > 0 && (
+          <div>
+            <button
+              onClick={() => setAlertExpanded(!alertExpanded)}
+              className="w-full flex items-center justify-between py-3 hover:opacity-70 transition-opacity"
+            >
+              <div className="flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-red-500" />
+                <span className="font-medium text-red-600">需关注</span>
+                <span className="text-xs text-red-400">({alertChannels.length})</span>
+              </div>
+              {alertExpanded ? <ChevronUp className="w-4 h-4 text-neutral-400" /> : <ChevronDown className="w-4 h-4 text-neutral-400" />}
+            </button>
+            {alertExpanded && (
+              <div className="mt-2 space-y-2">
+                {alertChannels.map((channel) => (
+                  <div key={channel.id} className="flex items-center gap-3 p-3 bg-red-50 rounded-xl">
+                    <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <span className="font-medium text-neutral-900">{channel.name}</span>
+                      <p className="text-sm text-neutral-500 truncate">{channel.summary}</p>
+                    </div>
+                    <span className="text-xs text-neutral-400 flex-shrink-0">{channel.lastActive}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Auto Reply Channels - Always Visible */}
+        <div className="space-y-2">
+          {/* Header with global toggle */}
+          <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 text-red-500" />
-              <span className="font-medium text-red-600">需关注</span>
-              <span className="text-xs text-red-400">({alertChannels.length})</span>
+              <Zap className="w-4 h-4 text-neutral-500" />
+              <span className="font-medium text-neutral-900">自动回复通道</span>
+              <span className="text-xs text-neutral-500">({autoReplyChannels.length})</span>
+              {loadingAutoReplyChannels && <Loader2 className="w-3 h-3 animate-spin text-neutral-400" />}
             </div>
-            {alertExpanded ? <ChevronUp className="w-4 h-4 text-neutral-400" /> : <ChevronDown className="w-4 h-4 text-neutral-400" />}
-          </button>
-          {alertExpanded && (
-            <div className="mt-2 space-y-2">
-              {alertChannels.map((channel) => (
-                <div key={channel.id} className="flex items-center gap-3 p-3 bg-red-50 rounded-xl">
-                  <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse flex-shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <span className="font-medium text-neutral-900">{channel.name}</span>
-                    <p className="text-sm text-neutral-500 truncate">{channel.summary}</p>
-                  </div>
-                  <span className="text-xs text-neutral-400 flex-shrink-0">{channel.lastActive}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Auto Reply Channels */}
-      <div>
-        <button 
-          onClick={() => setAutoReplyExpanded(!autoReplyExpanded)}
-          className="w-full flex items-center justify-between py-3 hover:opacity-70 transition-opacity"
-        >
-          <div className="flex items-center gap-2">
-            <Zap className="w-4 h-4 text-neutral-500" />
-            <span className="font-medium text-neutral-900">自动回复通道</span>
-            <span className="text-xs text-neutral-500">({monitoringChannels.length})</span>
-          </div>
-          {autoReplyExpanded ? <ChevronUp className="w-4 h-4 text-neutral-400" /> : <ChevronDown className="w-4 h-4 text-neutral-400" />}
-        </button>
-        {autoReplyExpanded && (
-          <div className="mt-2 space-y-2">
-            {monitoringChannels.map((channel) => (
-              <div key={channel.id} className="flex items-center gap-3 p-3 bg-neutral-100 rounded-xl">
-                {channel.type === 'person' && channel.avatar ? (
-                  <img src={channel.avatar} alt="" className="w-10 h-10 rounded-full flex-shrink-0" />
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-neutral-500">自动回复模式</span>
+              <button
+                type="button"
+                onClick={handleToggleAutoReplyMode}
+                className={`p-1.5 rounded-full transition-colors ${
+                  autoReplyModeEnabled
+                    ? 'bg-green-100 text-green-600 hover:bg-green-200'
+                    : 'bg-neutral-100 text-neutral-400 hover:bg-neutral-200'
+                }`}
+                title={autoReplyModeEnabled ? '关闭自动回复模式' : '开启自动回复模式'}
+              >
+                {autoReplyModeEnabled ? (
+                  <ToggleRight className="w-5 h-5" />
                 ) : (
-                  <div className="w-10 h-10 bg-white rounded-full flex items-center justify-center flex-shrink-0">
-                    <MessageCircle className="w-5 h-5 text-neutral-400" />
-                  </div>
+                  <ToggleLeft className="w-5 h-5" />
                 )}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium text-neutral-900 truncate">{channel.name}</span>
-                    {channel.hasAlert && <span className="w-2 h-2 bg-red-500 rounded-full flex-shrink-0" />}
-                  </div>
-                  <p className="text-xs text-neutral-500 truncate">{channel.summary}</p>
+              </button>
+            </div>
+          </div>
+
+          {/* Channel Cards */}
+          {autoReplyChannels.map((channel) => (
+            <div
+              key={channel.id}
+              className={`relative flex items-center gap-3 p-3 rounded-xl cursor-pointer transition-colors ${
+                channel.enabled
+                  ? 'bg-green-50 border border-green-200 hover:bg-green-100'
+                  : 'bg-neutral-100 border border-transparent hover:bg-neutral-200'
+              }`}
+              onClick={() => setSelectedAutoReplyChannel(channel)}
+            >
+              {channel.type === 'person' && channel.avatar ? (
+                <img src={channel.avatar} alt="" className="w-10 h-10 rounded-full flex-shrink-0" />
+              ) : (
+                <div className="w-10 h-10 bg-white rounded-full flex items-center justify-center flex-shrink-0">
+                  <MessageCircle className="w-5 h-5 text-neutral-400" />
                 </div>
+              )}
+              <div className="flex-1 min-w-0 pr-20">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium text-neutral-900 truncate">{channel.name}</span>
+                </div>
+                <p className="text-xs text-neutral-500 truncate">{channel.summary}</p>
+              </div>
+              <div className="absolute right-10 top-1/2 flex -translate-y-1/2 items-center">
                 <button
-                  onClick={() => toggleAutoReply(channel.id)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors flex-shrink-0 ${
-                    channel.autoReply ? 'bg-green-500 text-white' : 'bg-white text-neutral-500'
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void handleToggleAutoReplyChannelMode(channel);
+                  }}
+                  className={`p-1.5 rounded-full transition-colors ${
+                    channel.enabled
+                      ? 'bg-green-100 text-green-600 hover:bg-green-200'
+                      : 'bg-neutral-100 text-neutral-400 hover:bg-neutral-200'
                   }`}
+                  title={channel.enabled ? '关闭该通道自动回复模式' : '开启该通道自动回复模式'}
                 >
-                  <Power className="w-3 h-3" />
-                  {channel.autoReply ? '开启' : '关闭'}
+                  {channel.enabled ? (
+                    <ToggleRight className="w-5 h-5" />
+                  ) : (
+                    <ToggleLeft className="w-5 h-5" />
+                  )}
                 </button>
               </div>
-            ))}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void handleToggleStatusChannel(channel.id);
+                }}
+                className="absolute top-2 right-2 p-1 text-neutral-300 hover:text-red-400 transition-colors rounded-full hover:bg-red-50"
+                title="关闭自动回复（移出通道）"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+
+        {/* Auto-reply Channel Detail Modal */}
+        {selectedAutoReplyChannel && (
+          <div
+            className="fixed inset-0 bg-black/30 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+            onClick={() => setSelectedAutoReplyChannel(null)}
+          >
+            <div
+              className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between mb-4">
+                <div className="flex items-center gap-3">
+                  {selectedAutoReplyChannel.type === 'person' && selectedAutoReplyChannel.avatar ? (
+                    <img src={selectedAutoReplyChannel.avatar} alt="" className="w-12 h-12 rounded-full" />
+                  ) : (
+                    <div className="w-12 h-12 bg-neutral-100 rounded-full flex items-center justify-center">
+                      <MessageCircle className="w-6 h-6 text-neutral-400" />
+                    </div>
+                  )}
+                  <div>
+                    <h3 className="text-lg font-semibold text-neutral-900">{selectedAutoReplyChannel.name}</h3>
+                    <p className="text-xs text-neutral-500">{selectedAutoReplyChannel.type === 'person' ? '联系人' : '群聊'}</p>
+                  </div>
+                </div>
+                <button onClick={() => setSelectedAutoReplyChannel(null)} className="p-1 hover:bg-neutral-100 rounded-lg">
+                  <X className="w-5 h-5 text-neutral-400" />
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                {/* Current Status */}
+                <div className="flex items-center justify-between p-3 bg-neutral-50 rounded-xl">
+                  <div>
+                    <p className="text-sm font-medium text-neutral-900">自动回复状态</p>
+                    <p className="text-xs text-neutral-500 mt-0.5">当前状态：{selectedAutoReplyChannel.autoReply ? '已开启' : '已关闭'}</p>
+                  </div>
+                  <button
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      if (!selectedAutoReplyChannel) return;
+                      try {
+                        await api.autoReply.toggle(selectedAutoReplyChannel.id);
+                        setSelectedAutoReplyChannel(prev => prev ? { ...prev, autoReply: !prev.autoReply } : null);
+                        await loadAutoReplyChannels();
+                      } catch (err) {
+                        alert('操作失败: ' + err);
+                      }
+                    }}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
+                      selectedAutoReplyChannel.autoReply
+                        ? 'bg-green-500 text-white hover:bg-green-600'
+                        : 'bg-white text-neutral-500 hover:bg-neutral-100'
+                    }`}
+                  >
+                    <Power className="w-3 h-3" />
+                    {selectedAutoReplyChannel.autoReply ? '关闭' : '开启'}
+                  </button>
+                </div>
+
+                {/* Config if exists */}
+                {selectedAutoReplyChannel.config && (
+                  <div className="space-y-3">
+                    <p className="text-sm font-medium text-neutral-900">当前配置</p>
+                    {selectedAutoReplyChannel.config.templateId && (
+                      <div className="p-3 bg-neutral-50 rounded-xl">
+                        <p className="text-xs text-neutral-500 mb-1">使用模板</p>
+                        <p className="text-sm text-neutral-900">ID: {selectedAutoReplyChannel.config.templateId}</p>
+                      </div>
+                    )}
+                    {selectedAutoReplyChannel.config.knowledgeTags && selectedAutoReplyChannel.config.knowledgeTags.length > 0 && (
+                      <div className="p-3 bg-neutral-50 rounded-xl">
+                        <p className="text-xs text-neutral-500 mb-1">知识标签</p>
+                        <div className="flex flex-wrap gap-1">
+                          {selectedAutoReplyChannel.config.knowledgeTags.map((tag, idx) => (
+                            <span key={idx} className="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs rounded-full">{tag}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {selectedAutoReplyChannel.config.customContext && (
+                      <div className="p-3 bg-neutral-50 rounded-xl">
+                        <p className="text-xs text-neutral-500 mb-1">自定义上下文</p>
+                        <p className="text-sm text-neutral-900">{selectedAutoReplyChannel.config.customContext}</p>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* No config message */}
+                {!selectedAutoReplyChannel.config && (
+                  <div className="p-3 bg-neutral-50 rounded-xl text-center">
+                    <p className="text-sm text-neutral-500">该通道暂无详细配置</p>
+                    <p className="text-xs text-neutral-400 mt-1">点击"开启"后可在设置中配置</p>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         )}
       </div>
-    </div>
-  );
-
-  // ============ Timeline Page ============
+    );
+  };
   const TimelinePage = () => {
     return (
       <div className="space-y-4">
@@ -403,8 +624,38 @@ function App() {
     );
   };
 
+  // ============ Contacts Page Props ============
+  interface ContactsPageProps {
+    contacts: Person[];
+    contactsStatus: 'idle' | 'loading' | 'error' | 'ready';
+    searchResults: Person[];
+    searchLoading: boolean;
+    searchLark: (q: string, type: 'person' | 'group') => Promise<void>;
+    addContact: (contact: {
+      id: string;
+      name: string;
+      avatar: string;
+      title?: string;
+      contact_type: 'person' | 'group';
+    }) => Promise<void>;
+    removeContact: (id: string) => Promise<void>;
+    patchContact: (id: string, data: Partial<Pick<Person, 'tags' | 'knows' | 'lastTalk' | 'talkCount' | 'autoReply' | 'syncMode' | 'syncLimit'>>) => Promise<void>;
+    refreshContacts: () => Promise<void>;
+    // Modal/UI state
+    selectedContact: Person | null;
+    setSelectedContact: (p: Person | null) => void;
+    showAddContact: boolean;
+    setShowAddContact: (b: boolean) => void;
+    addContactType: 'person' | 'group';
+    setAddContactType: (t: 'person' | 'group') => void;
+    addSearchQuery: string;
+    setAddSearchQuery: (q: string) => void;
+    addedIds: Set<string>;
+    setAddedIds: Dispatch<SetStateAction<Set<string>>>;
+  }
+
   // ============ Contacts Page ============
-  const ContactsPage = () => {
+  const ContactsPage = (props: ContactsPageProps) => {
     // Debounce ref for search input in add dialog
     const debounceRef = { current: 0 as ReturnType<typeof setTimeout> };
 
@@ -415,13 +666,13 @@ function App() {
     } | null>(null);
     const [summaryLoading, setSummaryLoading] = useState(false);
     const [summaryError, setSummaryError] = useState<string | null>(null);
-    const [syncingContact, setSyncingContact] = useState(false);
+    const [syncingContactIds, setSyncingContactIds] = useState<Set<string>>(new Set());
     const [analyzingContact, setAnalyzingContact] = useState(false);
     const [analyzeMsg, setAnalyzeMsg] = useState<string | null>(null);
 
     // Load summary when selectedContact changes
     useEffect(() => {
-      if (!selectedContact) {
+      if (!props.selectedContact) {
         setSummaryData(null);
         setSummaryError(null);
         setAnalyzeMsg(null);
@@ -431,7 +682,7 @@ function App() {
       setSummaryData(null);
       setSummaryError(null);
       setAnalyzeMsg(null);
-      api.contacts.summary(selectedContact.id)
+      api.contacts.summary(props.selectedContact.id)
         .then(data => {
           setSummaryData({ messages: data.messages, last_message_at: data.last_message_at });
         })
@@ -439,29 +690,14 @@ function App() {
           setSummaryError(String(err));
         })
         .finally(() => setSummaryLoading(false));
-    }, [selectedContact?.id]);
-
-    const handleSyncContact = async () => {
-      if (!selectedContact) return;
-      setSyncingContact(true);
-      try {
-        await api.messages.syncContact(selectedContact.id);
-        // Reload summary after sync
-        const data = await api.contacts.summary(selectedContact.id);
-        setSummaryData({ messages: data.messages, last_message_at: data.last_message_at });
-      } catch (err) {
-        setSummaryError('同步失败: ' + String(err));
-      } finally {
-        setSyncingContact(false);
-      }
-    };
+    }, [props.selectedContact?.id]);
 
     const handleAnalyzeContact = async () => {
-      if (!selectedContact) return;
+      if (!props.selectedContact) return;
       setAnalyzingContact(true);
       setAnalyzeMsg(null);
       try {
-        await api.ai.analyze(selectedContact.id);
+        await api.ai.analyze(props.selectedContact.id);
         setAnalyzeMsg('分析完成，请查看时间轴');
       } catch (err) {
         setAnalyzeMsg('分析失败: ' + String(err));
@@ -471,34 +707,96 @@ function App() {
     };
 
     const handleSearchInput = (val: string) => {
-      setAddSearchQuery(val);
+      props.setAddSearchQuery(val);
       clearTimeout(debounceRef.current);
       debounceRef.current = setTimeout(() => {
-        searchLark(val, addContactType);
+        props.searchLark(val, props.addContactType);
       }, 500);
     };
 
     const handleTypeChange = (type: 'person' | 'group') => {
-      setAddContactType(type);
-      setAddSearchQuery('');
+      props.setAddContactType(type);
+      props.setAddSearchQuery('');
       if (type === 'group') {
-        searchLark('', 'group');
+        props.searchLark('', 'group');
       }
     };
 
     const handleAdd = async (c: Person) => {
-      await addContact({
+      await props.addContact({
         id: c.id,
         name: c.name,
         avatar: c.avatar,
         title: c.title,
         contact_type: c.contact_type,
       });
-      setAddedIds(prev => new Set([...prev, c.id]));
+      props.setAddedIds(prev => new Set<string>([...prev, c.id]));
     };
 
-    const personContacts = contacts.filter(c => c.contact_type === 'person');
-    const groupContacts = contacts.filter(c => c.contact_type === 'group');
+    // Sync from card (without opening detail)
+    const handleSyncFromCard = async (contact: Person, e: React.MouseEvent) => {
+      e.stopPropagation();
+      try {
+        setSyncingContactIds(prev => {
+          const next = new Set<string>(prev);
+          next.add(contact.id);
+          return next;
+        });
+        const limit = contact.syncLimit || 20;
+        if (contact.contact_type === 'group') {
+          await api.messages.syncChat(contact.id, limit);
+        } else {
+          await api.messages.syncContact(contact.id, limit);
+        }
+        console.log('Synced:', contact.name);
+      } catch (err) {
+        alert('同步失败: ' + err);
+      } finally {
+        setSyncingContactIds(prev => {
+          const next = new Set<string>(prev);
+          next.delete(contact.id);
+          return next;
+        });
+      }
+    };
+
+    const personContacts = props.contacts.filter(c => c.contact_type === 'person');
+    const groupContacts = props.contacts.filter(c => c.contact_type === 'group');
+
+    // 计算全局自动回复状态：只要有一个开启就视为开启
+    const anyAutoReplyEnabled = props.contacts.some(c => c.autoReply);
+
+    // 全局切换自动回复
+    const handleToggleAllAutoReply = async () => {
+      const newGlobalState = !anyAutoReplyEnabled;
+      // 乐观更新：批量 patch（每个 patchContact 内部已做乐观更新）
+      try {
+        await Promise.all(
+          props.contacts.map(c =>
+            props.patchContact(c.id, { autoReply: newGlobalState })
+          )
+        );
+      } catch (err) {
+        alert('全局切换失败: ' + err);
+        // 失败后刷新恢复
+        await props.refreshContacts();
+      }
+    };
+
+    // 全局同步所有联系人
+    const handleSyncAll = async () => {
+      try {
+        // 先同步聊天列表（更新 contacts 和 chats）
+        await api.chats.sync();
+        // 再同步所有消息
+        await api.messages.syncAll(50);
+        // 最后刷新 contacts 以更新摘要等信息
+        await props.refreshContacts();
+        alert('全局同步完成');
+      } catch (err) {
+        alert('全局同步失败: ' + err);
+      }
+    };
 
     function formatMsgTime(isoStr: string): string {
       if (!isoStr) return '';
@@ -511,21 +809,46 @@ function App() {
         {/* Header */}
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold text-neutral-900">通讯录</h2>
-          <button
-            onClick={() => {
-              setShowAddContact(true);
-              setAddedIds(new Set());
-              setAddSearchQuery('');
-            }}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-900 text-white text-sm rounded-full hover:bg-neutral-800 transition-colors"
-          >
-            <Plus className="w-4 h-4" />
-            添加
-          </button>
+          <div className="flex items-center gap-2">
+            {/* 全局自动回复开关 */}
+            <button
+              onClick={handleToggleAllAutoReply}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
+                anyAutoReplyEnabled
+                  ? 'bg-green-500 text-white hover:bg-green-600'
+                  : 'bg-neutral-100 text-neutral-500 hover:bg-neutral-200'
+              }`}
+              title={anyAutoReplyEnabled ? '关闭所有自动回复' : '开启所有自动回复'}
+            >
+              <Power className="w-3.5 h-3.5" />
+              {anyAutoReplyEnabled ? '全部开启' : '全部关闭'}
+            </button>
+            {/* 全局同步按钮 */}
+            <button
+              onClick={handleSyncAll}
+              disabled={contactsStatus === 'loading'}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-500 text-white text-sm rounded-full hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              <RefreshCw className={`w-4 h-4 ${contactsStatus === 'loading' ? 'animate-spin' : ''}`} />
+              全局更新
+            </button>
+            {/* 添加联系人按钮 */}
+            <button
+              onClick={() => {
+                setShowAddContact(true);
+                setAddedIds(new Set());
+                setAddSearchQuery('');
+              }}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-900 text-white text-sm rounded-full hover:bg-neutral-800 transition-colors"
+            >
+              <Plus className="w-4 h-4" />
+              添加
+            </button>
+          </div>
         </div>
 
         {/* Loading */}
-        {contactsStatus === 'loading' && (
+        {props.contactsStatus === 'loading' && (
           <div className="flex items-center gap-2 text-sm text-neutral-400">
             <Loader2 className="w-4 h-4 animate-spin" />
             <span>加载中...</span>
@@ -542,9 +865,10 @@ function App() {
                   key={person.id}
                   className="relative bg-white rounded-xl p-4 border border-neutral-200 hover:border-neutral-300 transition-all"
                 >
+                  {/* Main clickable area (avatar + info) */}
                   <button
-                    onClick={() => setSelectedContact(person)}
-                    className="w-full text-left flex items-center gap-3"
+                    onClick={() => props.setSelectedContact(person)}
+                    className="w-full text-left flex items-center"
                   >
                     {person.avatar
                       ? <img src={person.avatar} alt="" className="w-12 h-12 rounded-full bg-neutral-100 flex-shrink-0" />
@@ -552,16 +876,51 @@ function App() {
                           <Users className="w-6 h-6 text-neutral-400" />
                         </div>
                     }
-                    <div className="flex-1 min-w-0">
+                    <div className="flex-1 min-w-0 ml-3">
                       <span className="font-medium text-neutral-900">{person.name}</span>
                       {person.title && (
                         <p className="text-xs text-neutral-400 mt-0.5">{person.title}</p>
                       )}
                     </div>
-                    <ChevronRight className="w-4 h-4 text-neutral-300 flex-shrink-0" />
                   </button>
+
+                  {/* Right-side actions (sync + auto-reply + chevron) */}
+                  <div className="absolute right-10 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                    <button
+                      onClick={(e) => handleSyncFromCard(person, e)}
+                      disabled={syncingContactIds.has(person.id)}
+                      className="p-1.5 rounded-lg transition-colors hover:bg-neutral-100 text-neutral-500 disabled:opacity-50"
+                      title="同步消息"
+                    >
+                      <RefreshCw className={`w-4 h-4 ${syncingContactIds.has(person.id) ? 'animate-spin' : ''}`} />
+                    </button>
+                    <button
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        const currentVal = Boolean(person.autoReply);
+                        const newVal = !currentVal;
+                        // 乐观更新
+                        props.patchContact(person.id, { autoReply: newVal });
+                      }}
+                      className={`p-1.5 rounded-full transition-colors ${
+                        person.autoReply
+                          ? 'bg-green-100 text-green-600 hover:bg-green-200'
+                          : 'bg-neutral-100 text-neutral-400 hover:bg-neutral-200'
+                      }`}
+                      title={person.autoReply ? '关闭自动回复' : '开启自动回复'}
+                    >
+                      {person.autoReply ? (
+                        <ToggleRight className="w-5 h-5" />
+                      ) : (
+                        <ToggleLeft className="w-5 h-5" />
+                      )}
+                    </button>
+                    <ChevronRight className="w-4 h-4 text-neutral-300 flex-shrink-0" />
+                  </div>
+
+                  {/* Delete button (top-right corner) */}
                   <button
-                    onClick={() => removeContact(person.id)}
+                    onClick={() => props.removeContact(person.id)}
                     className="absolute top-2 right-2 p-1 text-neutral-300 hover:text-red-400 transition-colors rounded-full hover:bg-red-50"
                     title="删除"
                   >
@@ -583,9 +942,10 @@ function App() {
                   key={group.id}
                   className="relative bg-white rounded-xl p-4 border border-neutral-200 hover:border-neutral-300 transition-all"
                 >
+                  {/* Main clickable area */}
                   <button
-                    onClick={() => setSelectedContact(group)}
-                    className="w-full text-left flex items-center gap-3"
+                    onClick={() => props.setSelectedContact(group)}
+                    className="w-full text-left flex items-center"
                   >
                     {group.avatar
                       ? <img src={group.avatar} alt="" className="w-12 h-12 rounded-xl bg-neutral-100 flex-shrink-0" />
@@ -593,7 +953,7 @@ function App() {
                           <MessageCircle className="w-6 h-6 text-neutral-400" />
                         </div>
                     }
-                    <div className="flex-1 min-w-0">
+                    <div className="flex-1 min-w-0 ml-3">
                       <span className="font-medium text-neutral-900">{group.name}</span>
                       {group.member_count !== undefined && (
                         <p className="text-xs text-neutral-400 mt-0.5">{group.member_count} 名成员</p>
@@ -601,8 +961,43 @@ function App() {
                     </div>
                     <ChevronRight className="w-4 h-4 text-neutral-300 flex-shrink-0" />
                   </button>
+
+                  {/* Right-side actions */}
+                  <div className="absolute right-10 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                    <button
+                      onClick={(e) => handleSyncFromCard(group, e)}
+                      disabled={syncingContactIds.has(group.id)}
+                      className="p-1.5 rounded-lg transition-colors hover:bg-neutral-100 text-neutral-500 disabled:opacity-50"
+                      title="同步消息"
+                    >
+                      <RefreshCw className={`w-4 h-4 ${syncingContactIds.has(group.id) ? 'animate-spin' : ''}`} />
+                    </button>
+                    <button
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        const currentVal = Boolean(group.autoReply);
+                        const newVal = !currentVal;
+                        // 乐观更新
+                        props.patchContact(group.id, { autoReply: newVal });
+                      }}
+                      className={`p-1.5 rounded-full transition-colors ${
+                        group.autoReply
+                          ? 'bg-green-100 text-green-600 hover:bg-green-200'
+                          : 'bg-neutral-100 text-neutral-400 hover:bg-neutral-200'
+                      }`}
+                      title={group.autoReply ? '关闭自动回复' : '开启自动回复'}
+                    >
+                      {group.autoReply ? (
+                        <ToggleRight className="w-5 h-5" />
+                      ) : (
+                        <ToggleLeft className="w-5 h-5" />
+                      )}
+                    </button>
+                  </div>
+
+                  {/* Delete button */}
                   <button
-                    onClick={() => removeContact(group.id)}
+                    onClick={() => props.removeContact(group.id)}
                     className="absolute top-2 right-2 p-1 text-neutral-300 hover:text-red-400 transition-colors rounded-full hover:bg-red-50"
                     title="删除"
                   >
@@ -615,7 +1010,7 @@ function App() {
         )}
 
         {/* Empty state */}
-        {contactsStatus === 'ready' && contacts.length === 0 && (
+        {props.contactsStatus === 'ready' && props.contacts.length === 0 && (
           <div className="text-center py-12 text-neutral-400">
             <Users className="w-12 h-12 mx-auto mb-3 opacity-30" />
             <p className="text-sm">通讯录为空</p>
@@ -636,7 +1031,7 @@ function App() {
               {/* Dialog header */}
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-lg font-semibold text-neutral-900">添加到通讯录</h3>
-                <button onClick={() => setShowAddContact(false)} className="p-1 hover:bg-neutral-100 rounded-lg">
+                <button onClick={() => props.setShowAddContact(false)} className="p-1 hover:bg-neutral-100 rounded-lg">
                   <X className="w-5 h-5 text-neutral-400" />
                 </button>
               </div>
@@ -648,7 +1043,7 @@ function App() {
                     key={t}
                     onClick={() => handleTypeChange(t)}
                     className={`flex-1 py-2 rounded-xl text-sm font-medium transition-colors ${
-                      addContactType === t
+                      props.addContactType === t
                         ? 'bg-neutral-900 text-white'
                         : 'bg-neutral-100 text-neutral-500 hover:bg-neutral-200'
                     }`}
@@ -663,9 +1058,9 @@ function App() {
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-400" />
                 <input
                   type="text"
-                  value={addSearchQuery}
+                  value={props.addSearchQuery}
                   onChange={(e) => handleSearchInput(e.target.value)}
-                  placeholder={addContactType === 'person' ? '搜索姓名...' : '过滤群名称...'}
+                  placeholder={props.addContactType === 'person' ? '搜索姓名...' : '过滤群名称...'}
                   autoFocus
                   className="w-full pl-9 pr-4 py-2.5 bg-neutral-50 border border-neutral-200 rounded-xl text-sm focus:outline-none focus:border-neutral-400"
                 />
@@ -673,18 +1068,18 @@ function App() {
 
               {/* Results */}
               <div className="flex-1 overflow-y-auto space-y-2 min-h-[100px]">
-                {searchLoading && (
+                {props.searchLoading && (
                   <div className="flex items-center justify-center py-8">
                     <Loader2 className="w-5 h-5 animate-spin text-neutral-400" />
                   </div>
                 )}
-                {!searchLoading && searchResults.length === 0 && (
+                {!props.searchLoading && props.searchResults.length === 0 && (
                   <div className="text-center py-8 text-neutral-400 text-sm">
-                    {addContactType === 'group' ? '输入群名称过滤' : '输入姓名搜索'}
+                    {props.addContactType === 'group' ? '输入群名称过滤' : '输入姓名搜索'}
                   </div>
                 )}
-                {searchResults.map((c) => {
-                  const alreadyAdded = addedIds.has(c.id) || contacts.some(e => e.id === c.id);
+                {props.searchResults.map((c) => {
+                  const alreadyAdded = props.addedIds.has(c.id) || props.contacts.some(e => e.id === c.id);
                   return (
                     <div key={c.id} className="flex items-center gap-3 p-3 rounded-xl hover:bg-neutral-50">
                       {c.avatar
@@ -735,36 +1130,28 @@ function App() {
               {/* Header */}
               <div className="flex items-start justify-between mb-4 flex-shrink-0">
                 <div className="flex items-center gap-4">
-                  {selectedContact.avatar
-                    ? <img src={selectedContact.avatar} alt="" className={`w-14 h-14 bg-neutral-100 flex-shrink-0 ${selectedContact.contact_type === 'group' ? 'rounded-xl' : 'rounded-full'}`} />
-                    : <div className={`w-14 h-14 bg-neutral-200 flex items-center justify-center flex-shrink-0 ${selectedContact.contact_type === 'group' ? 'rounded-xl' : 'rounded-full'}`}>
-                        {selectedContact.contact_type === 'group'
+                  {props.selectedContact!.avatar
+                    ? <img src={props.selectedContact!.avatar} alt="" className={`w-14 h-14 bg-neutral-100 flex-shrink-0 ${props.selectedContact!.contact_type === 'group' ? 'rounded-xl' : 'rounded-full'}`} />
+                    : <div className={`w-14 h-14 bg-neutral-200 flex items-center justify-center flex-shrink-0 ${props.selectedContact!.contact_type === 'group' ? 'rounded-xl' : 'rounded-full'}`}>
+                        {props.selectedContact!.contact_type === 'group'
                           ? <MessageCircle className="w-7 h-7 text-neutral-400" />
                           : <Users className="w-7 h-7 text-neutral-400" />
                         }
                       </div>
                   }
                   <div>
-                    <h3 className="text-lg font-semibold text-neutral-900">{selectedContact.name}</h3>
-                    {selectedContact.title && <p className="text-sm text-neutral-500">{selectedContact.title}</p>}
-                    <p className="text-xs text-neutral-400 mt-0.5">{selectedContact.contact_type === 'person' ? '联系人' : '群聊'}</p>
+                    <h3 className="text-lg font-semibold text-neutral-900">{props.selectedContact!.name}</h3>
+                    {props.selectedContact!.title && <p className="text-sm text-neutral-500">{props.selectedContact!.title}</p>}
+                    <p className="text-xs text-neutral-400 mt-0.5">{props.selectedContact!.contact_type === 'person' ? '联系人' : '群聊'}</p>
                   </div>
                 </div>
-                <button onClick={() => setSelectedContact(null)} className="p-1.5 hover:bg-neutral-100 rounded-lg flex-shrink-0">
+                <button onClick={() => props.setSelectedContact(null)} className="p-1.5 hover:bg-neutral-100 rounded-lg flex-shrink-0">
                   <X className="w-5 h-5 text-neutral-400" />
                 </button>
               </div>
 
               {/* Action buttons */}
               <div className="flex gap-2 mb-4 flex-shrink-0">
-                <button
-                  onClick={handleSyncContact}
-                  disabled={syncingContact}
-                  className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-blue-600 text-white text-sm rounded-xl hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                  {syncingContact ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-                  同步消息
-                </button>
                 <button
                   onClick={handleAnalyzeContact}
                   disabled={analyzingContact}
@@ -992,7 +1379,29 @@ function App() {
         <div className="p-4 lg:p-8 max-w-3xl">
           {activeTab === 'status' && <StatusPage />}
           {activeTab === 'timeline' && <TimelinePage />}
-          {activeTab === 'contacts' && <ContactsPage />}
+          {activeTab === 'contacts' && (
+            <ContactsPage
+              contacts={contacts}
+              contactsStatus={contactsStatus}
+              searchResults={searchResults}
+              searchLoading={searchLoading}
+              searchLark={searchLark}
+              addContact={addContact}
+              removeContact={removeContact}
+              patchContact={patchContact}
+              refreshContacts={refreshContacts}
+              selectedContact={selectedContact}
+              setSelectedContact={setSelectedContact}
+              showAddContact={showAddContact}
+              setShowAddContact={setShowAddContact}
+              addContactType={addContactType}
+              setAddContactType={setAddContactType}
+              addSearchQuery={addSearchQuery}
+              setAddSearchQuery={setAddSearchQuery}
+              addedIds={addedIds}
+              setAddedIds={setAddedIds}
+            />
+          )}
           {activeTab === 'settings' && <SettingsPage />}
         </div>
       </main>

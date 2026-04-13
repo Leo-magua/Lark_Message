@@ -2,7 +2,7 @@
 // In dev: Vite proxy forwards /api → localhost:3001
 // In prod: same-origin, no change needed
 
-import type { Person, Channel, Topic, TimelineEvent, Settings } from '@/types';
+import type { Person, Channel, Topic, TimelineEvent, Settings, Knowledge, Template, AutoReplyChannel, AutoReplyConfig } from '@/types';
 
 const BASE = '/api';
 
@@ -83,15 +83,21 @@ export const api = {
       });
     },
 
-    /** Update local enrichment fields (tags, knows, etc.) */
+    /** Update local enrichment fields (tags, knows, autoReply, sync settings, etc.)
+     * Note: syncMode/syncLimit only apply to monitored contacts/chats
+     */
     patch: async (
       id: string,
-      data: Partial<Pick<Person, 'tags' | 'knows' | 'lastTalk' | 'talkCount'>>
+      data: Partial<Pick<Person, 'tags' | 'knows' | 'lastTalk' | 'talkCount' | 'autoReply' | 'syncMode' | 'syncLimit'>>
     ): Promise<{ success: boolean }> => {
+      const body: any = { ...data };
+      // Convert snake_case for backend
+      if (data.syncMode !== undefined) body.sync_mode = data.syncMode;
+      if (data.syncLimit !== undefined) body.sync_limit = data.syncLimit;
       return apiFetch<{ success: boolean }>(`${BASE}/contacts/${encodeURIComponent(id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data),
+        body: JSON.stringify(body),
       });
     },
 
@@ -101,7 +107,7 @@ export const api = {
       name: string;
       avatar: string;
       contact_type: string;
-      messages: Array<{ sender: string; content: string; time: string }>;
+      messages: Array<{ id: number; sender: string; content: string; time: string }>;
       last_message_at: string;
     }> => {
       return apiFetch(`${BASE}/contacts/${encodeURIComponent(id)}/summary`);
@@ -113,11 +119,14 @@ export const api = {
       return apiFetch<Channel[]>(`${BASE}/chats`);
     },
 
-    update: async (chatId: string, patch: Partial<Pick<Channel, 'isMonitoring' | 'autoReply' | 'hasAlert'>>): Promise<Channel> => {
+    update: async (chatId: string, patch: Partial<Pick<Channel, 'isMonitoring' | 'autoReply' | 'hasAlert' | 'syncMode' | 'syncLimit'>>): Promise<Channel> => {
+      const body: any = { ...patch };
+      if (patch.syncMode !== undefined) body.sync_mode = patch.syncMode;
+      if (patch.syncLimit !== undefined) body.sync_limit = patch.syncLimit;
       return apiFetch<Channel>(`${BASE}/chats/${chatId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
+        body: JSON.stringify(body),
       });
     },
 
@@ -152,6 +161,29 @@ export const api = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ maxMessages }),
       });
+    },
+
+    /** Delete a single message */
+    delete: async (messageId: number): Promise<{ success: boolean }> => {
+      return apiFetch<{ success: boolean }>(`${BASE}/messages/${messageId}`, { method: 'DELETE' });
+    },
+
+    /** Bulk delete messages */
+    bulkDelete: async (ids: number[]): Promise<{ success: boolean; deleted: number }> => {
+      return apiFetch<{ success: boolean; deleted: number }>(`${BASE}/messages/bulk-delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      });
+    },
+
+    /** Get all messages (with optional filters) */
+    list: async (params?: { chatId?: string; limit?: number; offset?: number }): Promise<any> => {
+      const url = new URL(`${BASE}/messages`);
+      if (params?.chatId) url.searchParams.set('chatId', params.chatId);
+      if (params?.limit) url.searchParams.set('limit', String(params.limit));
+      if (params?.offset) url.searchParams.set('offset', String(params.offset));
+      return apiFetch(url.toString());
     },
   },
 
@@ -218,6 +250,97 @@ export const api = {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(settings),
+      });
+    },
+  },
+
+  // ── Knowledge Base ─────────────────────────────────────────────────────────
+  knowledge: {
+    list: async (): Promise<{ knowledge: Knowledge[] }> => {
+      return apiFetch<{ knowledge: Knowledge[] }>(`${BASE}/knowledge`);
+    },
+
+    create: async (data: { title: string; content: string; tags: string[] }): Promise<Knowledge> => {
+      return apiFetch<Knowledge>(`${BASE}/knowledge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+    },
+
+    update: async (id: number, data: Partial<{ title: string; content: string; tags: string[] }>): Promise<Knowledge> => {
+      return apiFetch<Knowledge>(`${BASE}/knowledge/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+    },
+
+    delete: async (id: number): Promise<void> => {
+      await apiFetch<void>(`${BASE}/knowledge/${id}`, { method: 'DELETE' });
+    },
+  },
+
+  // ── Reply Templates ─────────────────────────────────────────────────────────
+  templates: {
+    list: async (): Promise<{ templates: Template[] }> => {
+      return apiFetch<{ templates: Template[] }>(`${BASE}/templates`);
+    },
+
+    create: async (data: { name: string; systemPrompt: string; description?: string; isDefault?: boolean }): Promise<Template> => {
+      return apiFetch<Template>(`${BASE}/templates`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+    },
+
+    update: async (id: number, data: Partial<{ name: string; systemPrompt: string; description: string }>): Promise<Template> => {
+      return apiFetch<Template>(`${BASE}/templates/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+    },
+
+    delete: async (id: number): Promise<void> => {
+      await apiFetch<void>(`${BASE}/templates/${id}`, { method: 'DELETE' });
+    },
+
+    setDefault: async (id: number): Promise<void> => {
+      await apiFetch<void>(`${BASE}/templates/${id}/default`, { method: 'POST' });
+    },
+  },
+
+  // ── Auto-Reply Channels & Config ───────────────────────────────────────────
+  autoReply: {
+    /** Get all channels that have auto-reply enabled (or all for selection) */
+    getChannels: async (): Promise<{ channels: AutoReplyChannel[] }> => {
+      return apiFetch<{ channels: AutoReplyChannel[] }>(`${BASE}/auto-reply/channels`);
+    },
+
+    /** Toggle auto-reply status for a channel */
+    toggle: async (channelId: string): Promise<{ success: boolean }> => {
+      return apiFetch<{ success: boolean }>(`${BASE}/auto-reply/toggle/${encodeURIComponent(channelId)}`, {
+        method: 'POST',
+      });
+    },
+
+    /** Get config for a specific channel */
+    getConfig: async (channelType: 'person' | 'group', channelId: string): Promise<AutoReplyConfig> => {
+      return apiFetch<AutoReplyConfig>(`${BASE}/auto-reply/config/${channelType}/${channelId}`);
+    },
+
+    /** Save config for a specific channel */
+    setConfig: async (
+      channelType: 'person' | 'group',
+      channelId: string,
+      data: { templateId: number | null; knowledgeTags: string[]; customContext: string; enabled: boolean }
+    ): Promise<{ success: boolean }> => {
+      return apiFetch<{ success: boolean }>(`${BASE}/auto-reply/config/${channelType}/${channelId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
       });
     },
   },
