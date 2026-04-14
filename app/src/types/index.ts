@@ -134,12 +134,21 @@ export const topicColors = [
   { bg: 'bg-cyan-100', text: 'text-cyan-700', border: 'border-cyan-200', dot: 'bg-cyan-500' },
 ];
 
-/** Single message in contact summary (with id for deletion) */
+/** 与 DB `messages.ai_analysis_status` 一致 */
+export type MessageAiAnalysisStatusCode =
+  | 'unprocessed'
+  | 'contact_analyzed'
+  | 'global_analyzed';
+
+/** Single message in contact summary（含 AI 分析状态，由后端写入） */
 export interface ContactMessage {
   id: number;
   sender: string;
   content: string;
   time: string;
+  ai_analysis_status?: MessageAiAnalysisStatusCode;
+  /** 中文展示：未处理 / 单对话中已处理 / 全局已处理 */
+  ai_analysis_status_label?: string;
 }
 
 /** Contact summary with recent messages */

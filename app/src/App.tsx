@@ -30,7 +30,7 @@ import {
   Timer,
 } from 'lucide-react';
 import { topicColors } from '@/types';
-import type { Person, AutoReplyChannel, Template, ManagedEvent, Topic, ContactLinkedEvent } from '@/types';
+import type { Person, AutoReplyChannel, Template, ManagedEvent, Topic, ContactLinkedEvent, ContactMessage } from '@/types';
 import { useContacts } from '@/hooks/useContacts';
 import { useChats } from '@/hooks/useChats';
 import { useSettings } from '@/hooks/useSettings';
@@ -75,8 +75,6 @@ function App() {
   const {
     topics, events: _events, visibleEvents,
     addTopic: addTopicApi, deleteTopic, toggleTopicVisibility,
-    syncStatus: msgSyncStatus, syncInfo: msgSyncInfo, syncMessages,
-    analyzeAll, aiStatus, aiInfo,
     refresh: refreshTimeline,
     hideEventFromTimeline,
   } = useTimeline();
@@ -459,26 +457,6 @@ function App() {
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => analyzeAll()}
-              disabled={aiStatus === 'analyzing' || msgSyncStatus === 'syncing'}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-600 text-white text-sm rounded-full hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              {aiStatus === 'analyzing'
-                ? <Loader2 className="w-4 h-4 animate-spin" />
-                : <Bot className="w-4 h-4" />}
-              {aiStatus === 'analyzing' ? 'AI分析中...' : 'AI分析'}
-            </button>
-            <button
-              onClick={() => syncMessages({ fullSyncCap: settings.fullSyncCap })}
-              disabled={msgSyncStatus === 'syncing'}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-sm rounded-full hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              {msgSyncStatus === 'syncing'
-                ? <Loader2 className="w-4 h-4 animate-spin" />
-                : <RefreshCw className="w-4 h-4" />}
-              {msgSyncStatus === 'syncing' ? '同步中...' : '同步消息'}
-            </button>
-            <button
               onClick={() => setShowAddTopic(true)}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-900 text-white text-sm rounded-full hover:bg-neutral-800 transition-colors"
             >
@@ -487,28 +465,6 @@ function App() {
             </button>
           </div>
         </div>
-
-        {/* AI status bar */}
-        {aiInfo && (
-          <div className={`text-xs px-3 py-2 rounded-lg ${
-            aiStatus === 'error'
-              ? 'bg-red-50 text-red-600'
-              : 'bg-purple-50 text-purple-700'
-          }`}>
-            {aiInfo}
-          </div>
-        )}
-
-        {/* Sync status bar */}
-        {msgSyncInfo && (
-          <div className={`text-xs px-3 py-2 rounded-lg ${
-            msgSyncStatus === 'error'
-              ? 'bg-red-50 text-red-600'
-              : 'bg-blue-50 text-blue-700'
-          }`}>
-            {msgSyncInfo}
-          </div>
-        )}
 
         {/* Topic Filter Bar */}
         <div className="flex flex-wrap gap-2">
@@ -616,7 +572,7 @@ function App() {
             <div className="text-center py-12 text-neutral-400">
               <Clock className="w-12 h-12 mx-auto mb-3 opacity-30" />
               <p className="text-sm">暂无事件</p>
-              <p className="text-xs mt-1">请先同步消息并触发 AI 分析</p>
+              <p className="text-xs mt-1">请在通讯录中同步消息并触发 AI 分析</p>
             </div>
           )}
         </div>
@@ -1108,13 +1064,15 @@ function App() {
     globalDefaultSyncMode: 'latest' | 'full';
     globalDefaultSyncLimit: number;
     globalFullSyncCap: number;
+    /** AI 写入事件后刷新时间轴（与事件列表同源，避免各页数据脱节） */
+    refreshTimeline: () => Promise<void>;
   }
 
   // ============ Contacts Page ============
   const ContactsPage = (props: ContactsPageProps) => {
     // Summary drawer state
     const [summaryData, setSummaryData] = useState<{
-      messages: Array<{ sender: string; content: string; time: string }>;
+      messages: ContactMessage[];
       last_message_at: string;
     } | null>(null);
     const [summaryLoading, setSummaryLoading] = useState(false);
@@ -1213,6 +1171,13 @@ function App() {
           setChannelEvents(r.events);
         } catch {
           /* 事件列表刷新失败不阻断成功提示 */
+        }
+        await props.refreshTimeline();
+        try {
+          const sum = await api.contacts.summary(props.selectedContact.id);
+          setSummaryData({ messages: sum.messages, last_message_at: sum.last_message_at });
+        } catch {
+          /* 摘要刷新失败不阻断成功提示 */
         }
       } catch (err) {
         setAnalyzeMsg('分析失败: ' + String(err));
@@ -1899,9 +1864,25 @@ function App() {
                   <div className="flex-1 overflow-y-auto space-y-2">
                     {summaryData.messages.map((msg, idx) => (
                       <div key={idx} className="p-3 bg-neutral-50 rounded-xl">
-                        <div className="flex items-center justify-between mb-1">
+                        <div className="flex items-center justify-between mb-1 gap-2">
                           <span className="text-xs font-medium text-neutral-700 truncate max-w-[120px]">{msg.sender}</span>
-                          <span className="text-xs text-neutral-400 flex-shrink-0 ml-2">{formatMsgTime(msg.time)}</span>
+                          <div className="flex items-center gap-1.5 flex-shrink-0">
+                            {msg.ai_analysis_status_label ? (
+                              <span
+                                className={`text-[10px] px-1.5 py-0.5 rounded-full whitespace-nowrap ${
+                                  msg.ai_analysis_status === 'unprocessed'
+                                    ? 'bg-neutral-200 text-neutral-600'
+                                    : msg.ai_analysis_status === 'global_analyzed'
+                                      ? 'bg-violet-100 text-violet-700'
+                                      : 'bg-emerald-100 text-emerald-700'
+                                }`}
+                                title={msg.ai_analysis_status ?? 'unprocessed'}
+                              >
+                                {msg.ai_analysis_status_label}
+                              </span>
+                            ) : null}
+                            <span className="text-xs text-neutral-400">{formatMsgTime(msg.time)}</span>
+                          </div>
                         </div>
                         <p className="text-sm text-neutral-600 leading-relaxed line-clamp-3">{msg.content}</p>
                       </div>
@@ -2202,6 +2183,7 @@ function App() {
               setAddSearchQuery={setAddSearchQuery}
               addedIds={addedIds}
               setAddedIds={setAddedIds}
+              refreshTimeline={refreshTimeline}
             />
           )}
           {activeTab === 'settings' && <SettingsPage />}

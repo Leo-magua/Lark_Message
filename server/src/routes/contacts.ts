@@ -3,6 +3,8 @@ import { getDb } from '../db/connection.js';
 import { searchUsers, searchChats, getBestAvatar } from '../services/larkCli.js';
 import { syncAllContacts } from '../services/syncContacts.js';
 import { summarizeContactIntro } from '../services/contactIntroSummarize.js';
+import { listEventsForContact } from '../repositories/eventsRead.js';
+import { labelMessageAiStatusZh, normalizeMessageAiStatus } from '../constants/messageAiStatus.js';
 
 const router = Router();
 
@@ -318,23 +320,7 @@ router.get('/:id/events', (req, res) => {
     return;
   }
 
-  const rows = db
-    .prepare(
-      `
-    SELECT e.event_id, e.title, e.summary, COALESCE(e.speaker_highlights, '') AS speaker_highlights, e.occurred_at
-    FROM events e
-    WHERE e.source_contact_id = ? OR e.source_chat_id = ?
-    ORDER BY e.occurred_at DESC
-    LIMIT 200
-  `
-    )
-    .all(id, id) as Array<{
-    event_id: string;
-    title: string;
-    summary: string;
-    speaker_highlights: string;
-    occurred_at: string;
-  }>;
+  const rows = listEventsForContact(id, 200);
 
   res.json({
     events: rows.map(r => ({
@@ -367,7 +353,8 @@ router.get('/:id/summary', (req, res) => {
 
   // Fetch last N messages（与同步存储一致：群 chat_id；P2P 可能 chat_id 或 sender_id）
   const messages = db.prepare(`
-    SELECT id, sender_id, sender_name, content, created_at
+    SELECT id, sender_id, sender_name, content, created_at,
+           COALESCE(ai_analysis_status, 'unprocessed') AS ai_analysis_status
     FROM messages
     WHERE chat_id = ? OR sender_id = ?
     ORDER BY created_at DESC
@@ -378,6 +365,7 @@ router.get('/:id/summary', (req, res) => {
     sender_name: string;
     content: string;
     created_at: string;
+    ai_analysis_status: string;
   }>;
 
   const lastMessageAt = messages.length > 0 ? messages[0].created_at : '';
@@ -387,12 +375,17 @@ router.get('/:id/summary', (req, res) => {
     name: contact.name,
     avatar: contact.avatar_url,
     contact_type: contact.contact_type,
-    messages: messages.map(m => ({
-      id: m.id,
-      sender: m.sender_name || m.sender_id,
-      content: m.content,
-      time: m.created_at,
-    })),
+    messages: messages.map(m => {
+      const aiStatus = normalizeMessageAiStatus(m.ai_analysis_status);
+      return {
+        id: m.id,
+        sender: m.sender_name || m.sender_id,
+        content: m.content,
+        time: m.created_at,
+        ai_analysis_status: aiStatus,
+        ai_analysis_status_label: labelMessageAiStatusZh(aiStatus),
+      };
+    }),
     last_message_at: lastMessageAt,
   });
 });

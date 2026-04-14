@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { getDb } from '../db/connection.js';
+import { listEvents } from '../repositories/eventsRead.js';
 import { syncAllMonitoredChats, syncChatMessages } from '../services/syncMessages.js';
 
 const router = Router();
@@ -24,18 +25,6 @@ interface TopicRow {
   visible: number;
 }
 
-interface EventRow {
-  event_id: string;
-  title: string;
-  summary: string;
-  speaker_highlights: string | null;
-  source_chat_id: string | null;
-  source_contact_id: string | null;
-  occurred_at: string;
-  topic_ids: string | null;
-  timeline_hidden?: number | null;
-}
-
 // GET /api/messages?chatId=&limit=50&offset=0
 router.get('/', (req, res) => {
   const db = getDb();
@@ -57,20 +46,16 @@ router.get('/', (req, res) => {
 });
 
 // GET /api/timeline
-// Returns AI-analyzed events and all topics
+// Returns AI-analyzed events and all topics（事件行与 GET /api/events 同源，仅多过滤 timeline_hidden）
 router.get('/timeline', (_req, res) => {
   const db = getDb();
 
-  // 仅展示未从时间轴隐藏的事件（隐藏后仍可在「事件」管理页查看）
-  const eventRows = db.prepare(`
-    SELECT e.event_id, e.title, e.summary, COALESCE(e.speaker_highlights, '') AS speaker_highlights,
-           e.source_chat_id, e.source_contact_id, e.occurred_at,
-           (SELECT GROUP_CONCAT(et.topic_id) FROM event_topics et WHERE et.event_id = e.event_id) AS topic_ids
-    FROM events e
-    WHERE COALESCE(e.timeline_hidden, 0) = 0
-    ORDER BY e.occurred_at DESC
-    LIMIT 100
-  `).all() as unknown as EventRow[];
+  const TIMELINE_EVENT_LIMIT = 2000;
+  const eventRows = listEvents({
+    onlyTimelineVisible: true,
+    limit: TIMELINE_EVENT_LIMIT,
+    offset: 0,
+  });
 
   // Fetch all topics
   const topicRows = db.prepare(

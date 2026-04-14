@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '@/lib/api';
-import { mockTopics, mockTimelineEvents } from '@/data/mock';
 import { topicColors } from '@/types';
 import type { Topic, TimelineEvent } from '@/types';
 
@@ -20,13 +19,13 @@ export function useTimeline() {
     setLoading(true);
     try {
       const data = await api.timeline.get();
-      // Use real data if available; topics always come from backend
-      setTopics(data.topics.length ? data.topics : mockTopics);
-      setEvents(data.events.length ? data.events : mockTimelineEvents);
-    } catch {
-      console.warn('[useTimeline] Backend unavailable, falling back to mock data');
-      setTopics(mockTopics);
-      setEvents(mockTimelineEvents);
+      // 与「事件」页、通讯录详情同源：仅用后端返回数据，避免空 events 时用 mock 造成「有数据但不同库」的错觉
+      setTopics(data.topics ?? []);
+      setEvents(data.events ?? []);
+    } catch (err) {
+      console.warn('[useTimeline] Failed to load timeline:', err);
+      setTopics([]);
+      setEvents([]);
     } finally {
       setLoading(false);
     }

@@ -1,20 +1,9 @@
 import { Router } from 'express';
 import crypto from 'node:crypto';
 import { getDb } from '../db/connection.js';
+import { getEventById, listEvents, type EventDbRow } from '../repositories/eventsRead.js';
 
 const router = Router();
-
-interface EventDbRow {
-  event_id: string;
-  title: string;
-  summary: string;
-  speaker_highlights: string | null;
-  source_chat_id: string | null;
-  source_contact_id: string | null;
-  occurred_at: string;
-  timeline_hidden: number | null;
-  topic_ids: string | null;
-}
 
 function replaceEventTopics(eventId: string, topicIds: string[]) {
   const db = getDb();
@@ -40,25 +29,11 @@ function mapRow(row: EventDbRow) {
   };
 }
 
-/** 列表/单条查询共用（子查询聚合主题，避免 GROUP BY 与列兼容问题） */
-function baseSelectSql(): string {
-  return `
-    SELECT e.event_id, e.title, e.summary, COALESCE(e.speaker_highlights, '') AS speaker_highlights,
-           e.source_chat_id, e.source_contact_id, e.occurred_at,
-           COALESCE(e.timeline_hidden, 0) AS timeline_hidden,
-           (SELECT GROUP_CONCAT(et.topic_id) FROM event_topics et WHERE et.event_id = e.event_id) AS topic_ids
-    FROM events e
-  `;
-}
-
 // GET /api/events?limit=500&offset=0
 router.get('/', (req, res) => {
-  const db = getDb();
   const limit = Math.min(2000, Math.max(1, parseInt(String(req.query.limit ?? '500'), 10) || 500));
   const offset = Math.max(0, parseInt(String(req.query.offset ?? '0'), 10) || 0);
-  const rows = db
-    .prepare(`${baseSelectSql()} ORDER BY e.occurred_at DESC LIMIT ? OFFSET ?`)
-    .all(limit, offset) as unknown as EventDbRow[];
+  const rows = listEvents({ onlyTimelineVisible: false, limit, offset });
   res.json({ events: rows.map(mapRow) });
 });
 
@@ -118,16 +93,13 @@ router.post('/', (req, res) => {
   if (Array.isArray(body.topic_ids) && body.topic_ids.length > 0) {
     replaceEventTopics(eventId, body.topic_ids);
   }
-  const row = db.prepare(`${baseSelectSql()} WHERE e.event_id = ?`).get(eventId) as unknown as EventDbRow | undefined;
+  const row = getEventById(eventId);
   res.status(201).json(row ? mapRow(row) : { id: eventId });
 });
 
 // GET /api/events/:eventId
 router.get('/:eventId', (req, res) => {
-  const db = getDb();
-  const row = db
-    .prepare(`${baseSelectSql()} WHERE e.event_id = ?`)
-    .get(req.params.eventId) as unknown as EventDbRow | undefined;
+  const row = getEventById(req.params.eventId);
   if (!row) {
     res.status(404).json({ error: 'not found' });
     return;
@@ -194,7 +166,11 @@ router.patch('/:eventId', (req, res) => {
     replaceEventTopics(eventId, Array.isArray(body.topic_ids) ? body.topic_ids : []);
   }
 
-  const row = db.prepare(`${baseSelectSql()} WHERE e.event_id = ?`).get(eventId) as unknown as EventDbRow;
+  const row = getEventById(eventId);
+  if (!row) {
+    res.status(404).json({ error: 'not found' });
+    return;
+  }
   res.json(mapRow(row));
 });
 

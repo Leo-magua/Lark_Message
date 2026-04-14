@@ -2,7 +2,7 @@
 // In dev: Vite proxy forwards /api → localhost:8001（见 `app/vite.config.ts`）
 // In prod: same-origin, no change needed
 
-import type { Person, Channel, Topic, TimelineEvent, ManagedEvent, Settings, Knowledge, Template, AutoReplyChannel, AutoReplyConfig, ContactLinkedEvent } from '@/types';
+import type { Person, Channel, Topic, TimelineEvent, ManagedEvent, Settings, Knowledge, Template, AutoReplyChannel, AutoReplyConfig, ContactLinkedEvent, ContactSummary } from '@/types';
 
 const BASE = '/api';
 
@@ -121,14 +121,7 @@ export const api = {
     },
 
     /** Get recent message summary for a contact */
-    summary: async (id: string): Promise<{
-      contact_id: string;
-      name: string;
-      avatar: string;
-      contact_type: string;
-      messages: Array<{ id: number; sender: string; content: string; time: string }>;
-      last_message_at: string;
-    }> => {
+    summary: async (id: string): Promise<ContactSummary> => {
       return apiFetch(`${BASE}/contacts/${encodeURIComponent(id)}/summary`);
     },
 

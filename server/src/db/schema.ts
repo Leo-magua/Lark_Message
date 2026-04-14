@@ -246,4 +246,13 @@ export function runMigrations(): void {
   } catch {
     /* ignore */
   }
+
+  try {
+    db.exec(`
+      ALTER TABLE messages ADD COLUMN ai_analysis_status TEXT NOT NULL DEFAULT 'unprocessed'
+    `);
+    console.log('[DB] Added messages.ai_analysis_status (AI 分析状态：未处理 / 单对话 / 全局)');
+  } catch {
+    /* Column already exists */
+  }
 }

@@ -1,4 +1,8 @@
 import { getDb } from '../db/connection.js';
+import {
+  MESSAGE_AI_STATUS,
+  type MessageAiAnalysisStatus,
+} from '../constants/messageAiStatus.js';
 
 interface AnalyzeResult {
   events: Array<{
@@ -14,10 +18,26 @@ interface AnalyzeResult {
 }
 
 interface MessageRow {
+  id: number;
   sender_name: string | null;
   created_at: string | null;
   content: string | null;
   chat_id: string;
+}
+
+/** AI 分析成功后，将本批参与分析的消息行标记为对应状态 */
+function markMessagesAiAnalyzed(ids: number[], scope: 'contact' | 'global'): void {
+  const unique = [...new Set(ids.filter((n) => Number.isInteger(n) && n > 0))];
+  if (unique.length === 0) return;
+  const status: MessageAiAnalysisStatus =
+    scope === 'global' ? MESSAGE_AI_STATUS.GLOBAL_ANALYZED : MESSAGE_AI_STATUS.CONTACT_ANALYZED;
+  const db = getDb();
+  const chunkSize = 200;
+  for (let i = 0; i < unique.length; i += chunkSize) {
+    const chunk = unique.slice(i, i + chunkSize);
+    const ph = chunk.map(() => '?').join(',');
+    db.prepare(`UPDATE messages SET ai_analysis_status = ? WHERE id IN (${ph})`).run(status, ...chunk);
+  }
 }
 
 interface TopicRow {
@@ -120,6 +140,18 @@ function stripCodeFences(s: string): string {
   return t.trim();
 }
 
+/** 捕获 ```json ... ``` / ``` ... ``` 内的片段（模型常忽略「不要 markdown」说明） */
+function extractMarkdownJsonBlocks(text: string): string[] {
+  const out: string[] = [];
+  const re = /```(?:json)?\s*([\s\S]*?)```/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const inner = m[1]?.trim();
+    if (inner) out.push(inner);
+  }
+  return out;
+}
+
 /** 从首个 { 起括号平衡截取，避免 /\\{.*\\}/s 在嵌套 JSON 上截断 */
 function extractBalancedJsonObject(text: string): string | null {
   const start = text.indexOf('{');
@@ -185,14 +217,88 @@ function normalizeAnalyzeEvents(raw: unknown): AnalyzeResult['events'] {
   return out;
 }
 
+/** 从若干「模型原始输出」字符串中收集待解析片段（避免推理链里先出现的 { 截断 JSON） */
+function collectRawTextCandidates(
+  message: Record<string, unknown> | undefined,
+  choice: Record<string, unknown> | undefined
+): string[] {
+  const out: string[] = [];
+  const push = (s: string) => {
+    const t = s.trim();
+    if (!t) return;
+    if (!out.includes(t)) out.push(t);
+  };
+
+  const content = extractMessageText(message).trim();
+  const reasoning = typeof message?.reasoning === 'string' ? message.reasoning.trim() : '';
+  const reasoningContent = typeof message?.reasoning_content === 'string' ? message.reasoning_content.trim() : '';
+
+  push(content);
+  push(reasoningContent);
+  push(reasoning);
+  if (reasoningContent && content) push(`${reasoningContent}\n\n${content}`);
+  if (reasoning && content) push(`${reasoning}\n\n${content}`);
+  push(concatModelOutputText(message));
+
+  const legacyText = choice && typeof choice.text === 'string' ? choice.text.trim() : '';
+  push(legacyText);
+
+  return out;
+}
+
+/** 从单段文本收集所有「可能是根对象」的子串，依次尝试 JSON.parse */
+function allJsonRootCandidates(text: string): string[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const add = (s: string | null | undefined) => {
+    if (!s) return;
+    const t = s.trim();
+    if (!t || seen.has(t)) return;
+    seen.add(t);
+    out.push(t);
+  };
+
+  for (const b of extractMarkdownJsonBlocks(trimmed)) {
+    add(stripCodeFences(b));
+    add(b);
+    add(extractBalancedJsonObject(b));
+    add(extractBalancedJsonObject(stripCodeFences(b)));
+  }
+
+  const cleaned = stripCodeFences(trimmed);
+  add(cleaned);
+  add(trimmed);
+  add(extractBalancedJsonObject(cleaned));
+  add(extractBalancedJsonObject(trimmed));
+
+  let braceChecks = 0;
+  for (let i = trimmed.length - 1; i >= 0 && braceChecks < 48; i--) {
+    if (trimmed[i] !== '{') continue;
+    braceChecks++;
+    add(extractBalancedJsonObject(trimmed.slice(i)));
+  }
+
+  return out;
+}
+
 function parseAnalyzeResultFromModelText(rawJson: string): AnalyzeResult | null {
   const trimmed = rawJson.trim();
   if (!trimmed) return null;
 
   const tryParse = (s: string): AnalyzeResult | null => {
-    for (const variant of [s, relaxJsonCommas(s)]) {
+    const smart = s.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"');
+    const variants = [s, smart, relaxJsonCommas(s), relaxJsonCommas(smart)];
+    for (const variant of variants) {
       try {
         const parsed = JSON.parse(variant) as unknown;
+        if (Array.isArray(parsed)) {
+          const evs = normalizeAnalyzeEvents(parsed);
+          if (evs.length > 0) return { events: evs, new_topics: [] };
+          continue;
+        }
         if (!parsed || typeof parsed !== 'object') continue;
         const obj = parsed as Record<string, unknown>;
         return {
@@ -206,15 +312,7 @@ function parseAnalyzeResultFromModelText(rawJson: string): AnalyzeResult | null 
     return null;
   };
 
-  const cleaned = stripCodeFences(trimmed);
-  const candidates = [
-    extractBalancedJsonObject(cleaned),
-    extractBalancedJsonObject(trimmed),
-    cleaned,
-    trimmed,
-  ].filter((x): x is string => Boolean(x && x.trim()));
-
-  for (const c of candidates) {
+  for (const c of allJsonRootCandidates(trimmed)) {
     const r = tryParse(c);
     if (r) return r;
   }
@@ -239,7 +337,7 @@ export async function analyzeMessages(
   const existingTopics = getExistingTopics();
   const userPrompt = buildPrompt(messages, existingTopics);
 
-  let rawJson = '';
+  let outputBlobs: string[] = [];
   try {
     const endpoint = openaiUrl.replace(/\/$/, '') + '/chat/completions';
 
@@ -288,19 +386,31 @@ export async function analyzeMessages(
         ? (choices[0] as Record<string, unknown>)
         : undefined;
     const message = first?.message as Record<string, unknown> | undefined;
-    rawJson = concatModelOutputText(message);
-    if (!rawJson.trim()) {
-      const legacyText = first?.text;
-      rawJson = typeof legacyText === 'string' ? legacyText : '';
+    const choice = first as Record<string, unknown> | undefined;
+    outputBlobs = collectRawTextCandidates(message, choice);
+    if (!outputBlobs.length) {
+      const fb = concatModelOutputText(message).trim();
+      const legacyText = typeof first?.text === 'string' ? first.text.trim() : '';
+      const merged = [fb, legacyText].filter(Boolean).join('\n\n');
+      if (merged) outputBlobs = [merged];
     }
   } catch (err) {
     console.error('[aiAnalyze] Fetch error:', err);
     return { error: `Network error: ${String(err)}` };
   }
 
-  const result = parseAnalyzeResultFromModelText(rawJson);
+  let result: AnalyzeResult | null = null;
+  let lastCandidateSnippet = '';
+  for (const blob of outputBlobs) {
+    lastCandidateSnippet = blob;
+    result = parseAnalyzeResultFromModelText(blob);
+    if (result) break;
+  }
   if (!result) {
-    console.error('[aiAnalyze] Non-JSON model output (first 1500 chars):', rawJson.slice(0, 1500));
+    console.error(
+      '[aiAnalyze] Non-JSON model output (last candidate, first 2000 chars):',
+      lastCandidateSnippet.slice(0, 2000)
+    );
     return { error: 'LLM returned non-JSON response' };
   }
 
@@ -374,6 +484,10 @@ export async function analyzeMessages(
     }
   }
 
+  const rowIds = messages.map(m => m.id).filter((n): n is number => Number.isInteger(n) && n > 0);
+  const scope: 'contact' | 'global' = contactId ? 'contact' : 'global';
+  markMessagesAiAnalyzed(rowIds, scope);
+
   console.log(`[aiAnalyze] Done: ${events.length} events, ${newTopicNames.length} new topics`);
   return result;
 }
@@ -385,7 +499,7 @@ export async function analyzeContactMessages(
   const db = getDb();
   const lim = Math.max(1, Math.min(500, Number.isFinite(Number(limit)) ? Number(limit) : 50));
   const messages = db.prepare(`
-    SELECT sender_name, created_at, content, chat_id
+    SELECT id, sender_name, created_at, content, chat_id
     FROM messages
     WHERE chat_id = ? OR sender_id = ?
     ORDER BY created_at DESC
@@ -408,7 +522,7 @@ export async function analyzeAllContacts(limit = 50): Promise<{ processed: numbe
 
   for (const { chat_id } of chatRows) {
     const messages = db.prepare(`
-      SELECT sender_name, created_at, content, chat_id
+      SELECT id, sender_name, created_at, content, chat_id
       FROM messages
       WHERE chat_id = ?
       ORDER BY created_at DESC
