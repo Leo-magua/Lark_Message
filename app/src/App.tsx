@@ -73,7 +73,7 @@ function App() {
   const { channels } = useChats();
   const { settings, setSettings, status: settingsStatus, saved: settingsSaved, saveSettings } = useSettings();
   const {
-    topics, events: _events, visibleEvents,
+    topics, events: _events,
     addTopic: addTopicApi, deleteTopic, toggleTopicVisibility,
     refresh: refreshTimeline,
     hideEventFromTimeline,
@@ -452,7 +452,7 @@ function App() {
           <div>
             <h3 className="text-sm font-medium text-neutral-500">时间轴</h3>
             <p className="text-xs text-neutral-400 mt-0.5">
-              {visibleEvents.length} 条事件
+              {_events.length} 条（未从时间轴隐藏）；事件页含「已隐藏」的完整列表
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -515,9 +515,10 @@ function App() {
           <div className="absolute left-[3.5rem] top-0 bottom-0 w-px bg-neutral-200" />
 
           <div className="space-y-0">
-            {visibleEvents.map((event) => {
-              // Find first matching visible topic for coloring
-              const matchedTopic = topics.find(t => event.topics.includes(t.topic_id));
+            {_events.map((event) => {
+              const matchedTopic =
+                topics.find(t => event.topics.includes(t.topic_id) && t.visible) ??
+                topics.find(t => event.topics.includes(t.topic_id));
               const colors = matchedTopic ? (topicColors[parseInt(matchedTopic.color)] ?? topicColors[0]) : topicColors[0];
               const timeLabel = formatEventTime(event.occurred_at);
 
@@ -537,7 +538,7 @@ function App() {
                       type="button"
                       onClick={() => void hideEventFromTimeline(event.id)}
                       className="absolute top-2 right-2 p-1 rounded-lg text-neutral-400 hover:text-neutral-700 hover:bg-white/60 transition-colors"
-                      title="从时间轴移除此条（数据仍在「事件」页，可恢复显示）"
+                      title="从时间轴隐藏（记录仍在，可在「事件」页勾选「时间轴」恢复）"
                     >
                       <X className="w-3.5 h-3.5" />
                     </button>
@@ -568,7 +569,7 @@ function App() {
             })}
           </div>
 
-          {visibleEvents.length === 0 && (
+          {_events.length === 0 && (
             <div className="text-center py-12 text-neutral-400">
               <Clock className="w-12 h-12 mx-auto mb-3 opacity-30" />
               <p className="text-sm">暂无事件</p>
@@ -580,7 +581,7 @@ function App() {
     );
   };
 
-  // ============ Events admin (full CRUD; timeline 「X」只写 timeline_hidden) ============
+  // ============ Events admin（全量含隐藏）；时间轴仅未隐藏，叉号写 timeline_hidden ============
   const EventsPage = () => {
     const [rows, setRows] = useState<ManagedEvent[]>([]);
     const [topicOptions, setTopicOptions] = useState<Topic[]>([]);
@@ -596,17 +597,20 @@ function App() {
     const [formShowOnTimeline, setFormShowOnTimeline] = useState(true);
     const [formTopicIds, setFormTopicIds] = useState<Set<string>>(new Set());
 
+    /** 全量事件（含「时间轴已隐藏」）与主题列表；时间轴 feed 仍用 /api/timeline 仅看未隐藏 */
     const loadRows = useCallback(async () => {
       setLoading(true);
       try {
         const [ev, tp] = await Promise.all([
-          api.events.list({ limit: 1500 }),
+          api.events.list({ limit: 2000, offset: 0 }),
           api.topics.list(),
         ]);
         setRows(ev.events);
         setTopicOptions(tp);
-      } catch {
+      } catch (e) {
+        console.warn('[EventsPage] loadRows failed:', e);
         setRows([]);
+        setTopicOptions([]);
       } finally {
         setLoading(false);
       }
@@ -658,6 +662,8 @@ function App() {
           occurred_at: occurredIso,
           timeline_hidden: !formShowOnTimeline,
           topic_ids: [...formTopicIds],
+          /** 事件页以手动勾选为准；全量 AI 重归类可另接开关或独立接口 */
+          skip_topic_auto_classify: true as const,
         };
         if (editingId) await api.events.update(editingId, payload);
         else await api.events.create(payload);
@@ -720,6 +726,27 @@ function App() {
       }
     };
 
+    /** 将选中事件恢复为时间轴可见（timeline_hidden=false） */
+    const bulkUnhideFromTimeline = async () => {
+      if (selected.size === 0) return;
+      setBusy(true);
+      try {
+        for (const id of selected) {
+          await api.events.update(id, {
+            timeline_hidden: false,
+            skip_topic_auto_classify: true,
+          });
+        }
+        setSelected(new Set());
+        await loadRows();
+        await refreshTimeline();
+      } catch (e) {
+        alert(String(e));
+      } finally {
+        setBusy(false);
+      }
+    };
+
     const toggleTopicPick = (topicId: string) => {
       setFormTopicIds(prev => {
         const n = new Set(prev);
@@ -735,7 +762,7 @@ function App() {
           <div>
             <h3 className="text-sm font-medium text-neutral-500">事件管理</h3>
             <p className="text-xs text-neutral-400 mt-0.5">
-              在此增删改查全部事件；时间轴上的「×」仅隐藏显示，不会删除记录。
+              在此管理全部事件（含已从时间轴隐藏的条目）；时间轴仅展示未隐藏项，「×」写入隐藏标记。
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -756,6 +783,15 @@ function App() {
             >
               <Plus className="w-3.5 h-3.5" />
               新增
+            </button>
+            <button
+              type="button"
+              onClick={() => void bulkUnhideFromTimeline()}
+              disabled={busy || selected.size === 0}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100 disabled:opacity-50"
+            >
+              <Eye className="w-3.5 h-3.5" />
+              取消隐藏 ({selected.size})
             </button>
             <button
               type="button"

@@ -42,6 +42,7 @@ export function runMigrations(): void {
     CREATE TABLE IF NOT EXISTS messages (
       id           INTEGER PRIMARY KEY AUTOINCREMENT,
       message_id   TEXT NOT NULL UNIQUE,
+      platform     TEXT NOT NULL DEFAULT 'lark',
       chat_id      TEXT NOT NULL,
       sender_id    TEXT,
       sender_name  TEXT,
@@ -55,11 +56,12 @@ export function runMigrations(): void {
     );
 
     CREATE TABLE IF NOT EXISTS topics (
-      id        INTEGER PRIMARY KEY AUTOINCREMENT,
-      topic_id  TEXT NOT NULL UNIQUE,
-      name      TEXT NOT NULL,
-      color     TEXT DEFAULT '0',
-      visible   INTEGER DEFAULT 1
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      topic_id       TEXT NOT NULL UNIQUE,
+      name           TEXT NOT NULL,
+      topic_context  TEXT NOT NULL DEFAULT '',
+      color          TEXT DEFAULT '0',
+      visible        INTEGER DEFAULT 1
     );
 
     CREATE TABLE IF NOT EXISTS events (
@@ -252,6 +254,20 @@ export function runMigrations(): void {
       ALTER TABLE messages ADD COLUMN ai_analysis_status TEXT NOT NULL DEFAULT 'unprocessed'
     `);
     console.log('[DB] Added messages.ai_analysis_status (AI 分析状态：未处理 / 单对话 / 全局)');
+  } catch {
+    /* Column already exists */
+  }
+
+  try {
+    db.exec(`ALTER TABLE messages ADD COLUMN platform TEXT NOT NULL DEFAULT 'lark'`);
+    console.log('[DB] Added messages.platform (原始消息来源平台，当前默认 lark)');
+  } catch {
+    /* Column already exists */
+  }
+
+  try {
+    db.exec(`ALTER TABLE topics ADD COLUMN topic_context TEXT NOT NULL DEFAULT ''`);
+    console.log('[DB] Added topics.topic_context（主题说明，供自动归类 LLM 使用）');
   } catch {
     /* Column already exists */
   }

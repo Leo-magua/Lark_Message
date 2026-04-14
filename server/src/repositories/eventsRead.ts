@@ -28,7 +28,7 @@ function baseSelectSql(): string {
  * 统一从 SQLite 读取事件（时间轴、事件管理、通讯录详情均走此逻辑，避免各路由 SQL 分叉）
  */
 export function listEvents(opts: {
-  /** true 时仅返回未从时间轴隐藏的条目（与 GET /api/timeline 一致） */
+  /** true 时排除 timeline_hidden（供 GET /api/timeline）；事件管理用 false 拉全量 */
   onlyTimelineVisible?: boolean;
   limit: number;
   offset?: number;

@@ -1,4 +1,5 @@
 import { getDb } from '../db/connection.js';
+import { linkNewTopicAcrossAllEvents } from './topicEventAutoLink.js';
 import {
   MESSAGE_AI_STATUS,
   type MessageAiAnalysisStatus,
@@ -425,17 +426,19 @@ export async function analyzeMessages(
   // Seed existing topics into map
   for (const t of existingTopics) topicNameToId[t.name] = t.topic_id;
 
+  const newlyCreatedTopicIds: string[] = [];
   for (const topicName of newTopicNames) {
     if (!existingTopicNames.has(topicName)) {
       const topicId = `topic_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       const colorIndex = (existingTopics.length % 6).toString();
       try {
         db.prepare(
-          'INSERT OR IGNORE INTO topics (topic_id, name, color, visible) VALUES (?, ?, ?, 1)'
-        ).run(topicId, topicName, colorIndex);
+          'INSERT OR IGNORE INTO topics (topic_id, name, color, visible, topic_context) VALUES (?, ?, ?, 1, ?)'
+        ).run(topicId, topicName, colorIndex, '');
         topicNameToId[topicName] = topicId;
         existingTopicNames.add(topicName);
         existingTopics.push({ topic_id: topicId, name: topicName, color: colorIndex });
+        newlyCreatedTopicIds.push(topicId);
         console.log(`[aiAnalyze] Created new topic: ${topicName} (${topicId})`);
       } catch (e) {
         console.warn('[aiAnalyze] Failed to insert topic:', topicName, e);
@@ -487,6 +490,16 @@ export async function analyzeMessages(
   const rowIds = messages.map(m => m.id).filter((n): n is number => Number.isInteger(n) && n > 0);
   const scope: 'contact' | 'global' = contactId ? 'contact' : 'global';
   markMessagesAiAnalyzed(rowIds, scope);
+
+  for (const tid of newlyCreatedTopicIds) {
+    try {
+      const r = await linkNewTopicAcrossAllEvents(tid);
+      console.log(`[aiAnalyze] New topic backfill ${tid}: scanned=${r.scanned} linked=${r.linked} batches=${r.batches}`, r.error ?? '');
+    } catch (e) {
+      console.warn('[aiAnalyze] linkNewTopicAcrossAllEvents:', tid, e);
+    }
+    await new Promise(res => setTimeout(res, 200));
+  }
 
   console.log(`[aiAnalyze] Done: ${events.length} events, ${newTopicNames.length} new topics`);
   return result;

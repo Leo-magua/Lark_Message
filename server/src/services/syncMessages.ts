@@ -204,10 +204,10 @@ function upsertMessage(msg: any, senderId: string, senderName: string, storeChat
 
   db.prepare(`
     INSERT OR IGNORE INTO messages
-      (message_id, chat_id, sender_id, sender_name, content, message_type,
+      (message_id, platform, chat_id, sender_id, sender_name, content, message_type,
        root_id, parent_id, created_at, raw_event)
     VALUES
-      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (?, 'lark', ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     msg.message_id,
     storeChatId,

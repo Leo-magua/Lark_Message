@@ -2,7 +2,20 @@
 // In dev: Vite proxy forwards /api → localhost:8001（见 `app/vite.config.ts`）
 // In prod: same-origin, no change needed
 
-import type { Person, Channel, Topic, TimelineEvent, ManagedEvent, Settings, Knowledge, Template, AutoReplyChannel, AutoReplyConfig, ContactLinkedEvent, ContactSummary } from '@/types';
+import type {
+  Person,
+  Channel,
+  Topic,
+  TimelineEvent,
+  ManagedEvent,
+  Settings,
+  Knowledge,
+  Template,
+  AutoReplyChannel,
+  AutoReplyConfig,
+  ContactLinkedEvent,
+  ContactSummary,
+} from '@/types';
 
 const BASE = '/api';
 
@@ -208,11 +221,12 @@ export const api = {
 
     /** Get all messages (with optional filters) */
     list: async (params?: { chatId?: string; limit?: number; offset?: number }): Promise<any> => {
-      const url = new URL(`${BASE}/messages`);
-      if (params?.chatId) url.searchParams.set('chatId', params.chatId);
-      if (params?.limit) url.searchParams.set('limit', String(params.limit));
-      if (params?.offset) url.searchParams.set('offset', String(params.offset));
-      return apiFetch(url.toString());
+      const sp = new URLSearchParams();
+      if (params?.chatId) sp.set('chatId', params.chatId);
+      if (params?.limit != null) sp.set('limit', String(params.limit));
+      if (params?.offset != null) sp.set('offset', String(params.offset));
+      const q = sp.toString();
+      return apiFetch(`${BASE}/messages${q ? `?${q}` : ''}`);
     },
   },
 
@@ -225,10 +239,11 @@ export const api = {
 
   events: {
     list: async (params?: { limit?: number; offset?: number }): Promise<{ events: ManagedEvent[] }> => {
-      const url = new URL(`${BASE}/events`);
-      if (params?.limit != null) url.searchParams.set('limit', String(params.limit));
-      if (params?.offset != null) url.searchParams.set('offset', String(params.offset));
-      return apiFetch<{ events: ManagedEvent[] }>(url.toString());
+      const sp = new URLSearchParams();
+      if (params?.limit != null) sp.set('limit', String(params.limit));
+      if (params?.offset != null) sp.set('offset', String(params.offset));
+      const q = sp.toString();
+      return apiFetch<{ events: ManagedEvent[] }>(`${BASE}/events${q ? `?${q}` : ''}`);
     },
 
     get: async (id: string): Promise<ManagedEvent> => {
@@ -244,6 +259,8 @@ export const api = {
       timeline_hidden?: boolean;
       source_chat_id?: string | null;
       source_contact_id?: string | null;
+      /** 为 true 时跳过 LLM，仅按 topic_ids 写入 */
+      skip_topic_auto_classify?: boolean;
     }): Promise<ManagedEvent> => {
       return apiFetch<ManagedEvent>(`${BASE}/events`, {
         method: 'POST',
@@ -263,6 +280,7 @@ export const api = {
         topic_ids: string[];
         source_chat_id: string | null;
         source_contact_id: string | null;
+        skip_topic_auto_classify: boolean;
       }>
     ): Promise<ManagedEvent> => {
       return apiFetch<ManagedEvent>(`${BASE}/events/${encodeURIComponent(id)}`, {
@@ -310,11 +328,11 @@ export const api = {
       return apiFetch<Topic[]>(`${BASE}/topics`);
     },
 
-    create: async (name: string, color: string): Promise<Topic> => {
+    create: async (name: string, color: string, topic_context?: string): Promise<Topic> => {
       return apiFetch<Topic>(`${BASE}/topics`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, color }),
+        body: JSON.stringify({ name, color, ...(topic_context !== undefined ? { topic_context } : {}) }),
       });
     },
 

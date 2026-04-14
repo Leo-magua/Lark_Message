@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { getDb } from '../db/connection.js';
 import { listEvents } from '../repositories/eventsRead.js';
 import { syncAllMonitoredChats, syncChatMessages } from '../services/syncMessages.js';
+import { linkNewTopicAcrossAllEvents } from '../services/topicEventAutoLink.js';
 
 const router = Router();
 
@@ -21,6 +22,7 @@ interface TopicRow {
   id: number;
   topic_id: string;
   name: string;
+  topic_context?: string;
   color: string;
   visible: number;
 }
@@ -46,7 +48,7 @@ router.get('/', (req, res) => {
 });
 
 // GET /api/timeline
-// Returns AI-analyzed events and all topics（事件行与 GET /api/events 同源，仅多过滤 timeline_hidden）
+// 时间轴视图：仅返回 timeline_hidden=0 的事件（叉号隐藏后不再出现）；全量管理见 GET /api/events
 router.get('/timeline', (_req, res) => {
   const db = getDb();
 
@@ -59,7 +61,7 @@ router.get('/timeline', (_req, res) => {
 
   // Fetch all topics
   const topicRows = db.prepare(
-    'SELECT id, topic_id, name, color, visible FROM topics ORDER BY id ASC'
+    `SELECT id, topic_id, name, COALESCE(topic_context, '') AS topic_context, color, visible FROM topics ORDER BY id ASC`
   ).all() as unknown as TopicRow[];
 
   const events = eventRows.map(row => ({
@@ -71,12 +73,14 @@ router.get('/timeline', (_req, res) => {
     occurred_at: row.occurred_at,
     source_contact_id: row.source_contact_id ?? undefined,
     source_chat_id: row.source_chat_id ?? undefined,
+    timeline_hidden: Boolean(row.timeline_hidden),
   }));
 
   const topics = topicRows.map(r => ({
     id: String(r.id),
     topic_id: r.topic_id,
     name: r.name,
+    topic_context: r.topic_context ?? '',
     color: r.color,
     visible: Boolean(r.visible),
   }));
@@ -87,44 +91,95 @@ router.get('/timeline', (_req, res) => {
 // GET /api/topics
 router.get('/topics', (_req, res) => {
   const db = getDb();
-  const rows = db.prepare('SELECT id, topic_id, name, color, visible FROM topics ORDER BY id ASC').all() as unknown as TopicRow[];
-  res.json(rows.map(r => ({
-    id: r.topic_id,
-    topic_id: r.topic_id,
-    name: r.name,
-    color: r.color,
-    visible: Boolean(r.visible),
-  })));
+  const rows = db
+    .prepare(
+      `SELECT id, topic_id, name, COALESCE(topic_context, '') AS topic_context, color, visible FROM topics ORDER BY id ASC`
+    )
+    .all() as unknown as TopicRow[];
+  res.json(
+    rows.map(r => ({
+      id: r.topic_id,
+      topic_id: r.topic_id,
+      name: r.name,
+      topic_context: r.topic_context ?? '',
+      color: r.color,
+      visible: Boolean(r.visible),
+    }))
+  );
 });
 
 // POST /api/topics
-router.post('/topics', (req, res) => {
-  const db = getDb();
-  const { name, color = '0' } = req.body as { name: string; color?: string };
-  if (!name) { res.status(400).json({ error: 'name is required' }); return; }
-  const topicId = `topic_${Date.now()}`;
-  db.prepare('INSERT INTO topics (topic_id, name, color, visible) VALUES (?, ?, ?, 1)').run(topicId, name, color);
-  res.json({ id: topicId, topic_id: topicId, name, color, visible: true });
+router.post('/topics', async (req, res) => {
+  try {
+    const db = getDb();
+    const { name, color = '0', topic_context = '' } = req.body as {
+      name: string;
+      color?: string;
+      topic_context?: string;
+    };
+    if (!name) {
+      res.status(400).json({ error: 'name is required' });
+      return;
+    }
+    const topicId = `topic_${Date.now()}`;
+    const ctx = typeof topic_context === 'string' ? topic_context : '';
+    db.prepare(
+      `INSERT INTO topics (topic_id, name, color, visible, topic_context) VALUES (?, ?, ?, 1, ?)`
+    ).run(topicId, name, color, ctx);
+
+    const autoLink = await linkNewTopicAcrossAllEvents(topicId);
+
+    res.json({
+      id: topicId,
+      topic_id: topicId,
+      name,
+      color,
+      visible: true,
+      topic_context: ctx,
+      auto_link: autoLink,
+    });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
 });
 
 // DELETE /api/topics/:topicId
 router.delete('/topics/:topicId', (req, res) => {
   const db = getDb();
-  db.prepare('DELETE FROM topics WHERE topic_id = ?').run(req.params.topicId);
+  const tid = req.params.topicId;
+  db.prepare('DELETE FROM event_topics WHERE topic_id = ?').run(tid);
+  db.prepare('DELETE FROM topics WHERE topic_id = ?').run(tid);
   res.json({ success: true });
 });
 
 // PATCH /api/topics/:topicId
 router.patch('/topics/:topicId', (req, res) => {
   const db = getDb();
-  const { visible, name } = req.body as { visible?: boolean; name?: string };
+  const { visible, name, topic_context } = req.body as {
+    visible?: boolean;
+    name?: string;
+    topic_context?: string;
+  };
   const { topicId } = req.params;
   const updates: string[] = [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const params: any[] = [];
-  if (visible !== undefined) { updates.push('visible = ?'); params.push(visible ? 1 : 0); }
-  if (name !== undefined) { updates.push('name = ?'); params.push(name); }
-  if (!updates.length) { res.status(400).json({ error: 'nothing to update' }); return; }
+  if (visible !== undefined) {
+    updates.push('visible = ?');
+    params.push(visible ? 1 : 0);
+  }
+  if (name !== undefined) {
+    updates.push('name = ?');
+    params.push(name);
+  }
+  if (topic_context !== undefined) {
+    updates.push('topic_context = ?');
+    params.push(topic_context);
+  }
+  if (!updates.length) {
+    res.status(400).json({ error: 'nothing to update' });
+    return;
+  }
   params.push(topicId);
   db.prepare(`UPDATE topics SET ${updates.join(', ')} WHERE topic_id = ?`).run(...params);
   res.json({ success: true });

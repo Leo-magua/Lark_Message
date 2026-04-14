@@ -19,7 +19,7 @@ export function useTimeline() {
     setLoading(true);
     try {
       const data = await api.timeline.get();
-      // 与「事件」页、通讯录详情同源：仅用后端返回数据，避免空 events 时用 mock 造成「有数据但不同库」的错觉
+      // 时间轴主列表与「事件」页同源（全量、含 timeline_hidden）；通讯录详情仍按联系人 id 另查
       setTopics(data.topics ?? []);
       setEvents(data.events ?? []);
     } catch (err) {
@@ -127,14 +127,17 @@ export function useTimeline() {
     }
   }, [topics, load]);
 
-  /** 仅从时间轴隐藏，数据库中仍存在，可在「事件」页恢复显示 */
+  /** 写入 timeline_hidden；刷新后该条从时间轴列表消失，可在「事件」页恢复 */
   const hideEventFromTimeline = useCallback(async (eventId: string) => {
     try {
-      await api.events.update(eventId, { timeline_hidden: true });
+      await api.events.update(eventId, {
+        timeline_hidden: true,
+        skip_topic_auto_classify: true,
+      });
       await load();
     } catch (err) {
       console.error('[useTimeline] hideEventFromTimeline', err);
-      alert(`从时间轴移除失败：${String(err)}`);
+      alert(`从时间轴隐藏失败：${String(err)}`);
     }
   }, [load]);
 
@@ -157,17 +160,11 @@ export function useTimeline() {
     }
   }, [topics]);
 
-  // visible logic: event is shown if at least one of its topic_ids has visible=true
-  // events with no topics are hidden
-  const visibleTopicIds = new Set(topics.filter(t => t.visible).map(t => t.topic_id));
-  const visibleEvents = events.filter(e =>
-    e.topics.length > 0 && e.topics.some(tid => visibleTopicIds.has(tid))
-  );
+  // 主列表与「事件」页同源：不按主题可见性、不按 timeline_hidden 过滤（隐藏仅作展示弱化，见时间轴 UI）
 
   return {
     topics,
     events,
-    visibleEvents,
     loading,
     syncStatus,
     syncInfo,

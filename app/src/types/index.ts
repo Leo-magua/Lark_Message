@@ -78,8 +78,18 @@ export interface Topic {
   id: string;
   topic_id: string;
   name: string;
+  /** 主题说明，供后端自动归类 LLM 使用 */
+  topic_context?: string;
   color: string;
   visible: boolean;
+}
+
+/** POST/PATCH /api/events 时主题自动归类结果 */
+export interface EventTopicAutoPayload {
+  applied: boolean;
+  skipped?: boolean;
+  topic_ids?: string[];
+  error?: string;
 }
 
 export interface TimelineEvent {
@@ -91,6 +101,8 @@ export interface TimelineEvent {
   /** list of topic_id strings */
   topics: string[];
   occurred_at: string;
+  /** 与事件页一致；为 true 时可在时间轴上弱化展示 */
+  timeline_hidden?: boolean;
   source_contact_id?: string;
   source_chat_id?: string;
 }
@@ -106,6 +118,7 @@ export interface ManagedEvent {
   timeline_hidden: boolean;
   source_contact_id?: string;
   source_chat_id?: string;
+  topic_auto?: EventTopicAutoPayload;
 }
 
 export interface Settings {
