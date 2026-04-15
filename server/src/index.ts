@@ -10,7 +10,7 @@ import settingsRouter from './routes/settings.js';
 import aiRouter from './routes/ai.js';
 import knowledgeRouter from './routes/knowledge.js';
 import templatesRouter from './routes/templates.js';
-import autoReplyConfigRouter from './routes/autoReplyConfig.js';
+import autoReplyConfigRouter, { postAutoReplyTest } from './routes/autoReplyConfig.js';
 import eventsRouter from './routes/events.js';
 import { syncAllMonitoredChats } from './services/syncMessages.js';
 import { checkAndAutoReplyAll } from './services/autoReply.js';
@@ -48,6 +48,7 @@ function startBackgroundMessageSyncScheduler(): void {
         console.log('[messageSync] Background sync: fetching monitored chats...');
         const { results, totalInserted } = await syncAllMonitoredChats();
         console.log(`[messageSync] Done. targets=${results.length} inserted=${totalInserted}`);
+        // After sync, also run auto-reply to process any newly fetched messages
         try {
           await checkAndAutoReplyAll();
         } catch (arErr) {
@@ -67,6 +68,25 @@ function startBackgroundMessageSyncScheduler(): void {
   setTimeout(loop, INITIAL_DELAY_MS);
 }
 
+/** 独立的自动回复调度器：每 30 秒处理一次已入库但未回复的消息。
+ *  不依赖「后台同步」开关 — 只要有消息（手动同步进来的也算）就会触发。 */
+function startAutoReplyScheduler(): void {
+  const INTERVAL_MS = 30_000;
+  const INITIAL_DELAY_MS = 15_000; // 稍晚于 sync scheduler 启动
+
+  const loop = async () => {
+    try {
+      await checkAndAutoReplyAll();
+    } catch (err) {
+      console.error('[autoReply] Scheduler error:', err);
+    }
+    setTimeout(loop, INTERVAL_MS);
+  };
+
+  console.log('[autoReply] Independent scheduler started (every 30s, regardless of sync polling)');
+  setTimeout(loop, INITIAL_DELAY_MS);
+}
+
 const app = express();
 
 app.use(cors({
@@ -81,28 +101,16 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// ─── Static files (frontend build) ───────────────────────────────────────────
-const frontendDist = path.join(import.meta.dirname, '..', '..', 'app', 'dist');
-app.use(express.static(frontendDist));
-
-// SPA fallback: serve index.html for any non-API route
-app.get('*', (req, res, next) => {
-  if (!req.path.startsWith('/api/')) {
-    res.sendFile(path.join(frontendDist, 'index.html'));
-  } else {
-    next(); // Continue to let Express handle 404 for unknown API routes
-  }
-});
-
-// Run DB migrations on startup
+// Run DB migrations before routes (same process as server)
 runMigrations();
 
-// Routes
+const frontendDist = path.join(import.meta.dirname, '..', '..', 'app', 'dist');
+
+// ─── API routes 必须注册在 static / SPA fallback 之前，否则部分 POST 无法匹配到子路由 ───
 app.use('/api/contacts', contactsRouter);
 app.use('/api/chats', chatsRouter);
 app.use('/api/messages', messagesRouter);
 app.use('/api/timeline', (_req, res, next) => {
-  // Forward /api/timeline to messages timeline handler
   _req.url = '/timeline' + (_req.url === '/' ? '' : _req.url);
   messagesRouter(_req, res, next);
 });
@@ -115,14 +123,14 @@ app.use('/api/events', eventsRouter);
 app.use('/api/ai', aiRouter);
 app.use('/api/knowledge', knowledgeRouter);
 app.use('/api/templates', templatesRouter);
+// 与 trigger 一致：顶层注册 POST，避免子 Router 未生效时出现 Cannot POST /api/auto-reply/test
+app.post('/api/auto-reply/test', postAutoReplyTest);
 app.use('/api/auto-reply', autoReplyConfigRouter);
 
-// Health check
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, ts: new Date().toISOString() });
 });
 
-// ─── Monitor Status ────────────────────────────────────────────────────────────
 app.get('/api/monitor/status', (_req, res) => {
   const db = getDb();
   const chatsMonitored = (db.prepare(
@@ -141,13 +149,23 @@ app.get('/api/monitor/status', (_req, res) => {
   });
 });
 
-// ─── Auto-reply manual trigger ────────────────────────────────────────────────
 app.post('/api/auto-reply/trigger', async (_req, res) => {
   try {
     await checkAndAutoReplyAll();
     res.json({ success: true, message: '自动回复检查完成' });
   } catch (err) {
     res.status(500).json({ success: false, error: String(err) });
+  }
+});
+
+// ─── Static + SPA（放在所有 /api 之后）────────────────────────────────────────
+app.use(express.static(frontendDist));
+
+app.get('*', (req, res, next) => {
+  if (!req.path.startsWith('/api/')) {
+    res.sendFile(path.join(frontendDist, 'index.html'));
+  } else {
+    next();
   }
 });
 
@@ -176,6 +194,8 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('  POST /api/ai/analyze-all             <- AI analyze all chats');
   console.log('  GET  /api/monitor/status             <- message sync polling status');
   console.log('  POST /api/auto-reply/trigger         <- manual auto-reply trigger');
+  console.log('  POST /api/auto-reply/test            <- LLM from local messages; body.send=true -> lark-cli send');
 
   startBackgroundMessageSyncScheduler();
+  startAutoReplyScheduler();
 });

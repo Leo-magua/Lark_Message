@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { DEFAULT_MODEL_ID } from '../constants/defaultModelId.js';
 import { getDb } from '../db/connection.js';
 
 const router = Router();
@@ -14,7 +15,8 @@ function getAllSettings() {
     openaiKey: map.openaiKey ?? '',
     openaiUrl: map.openaiUrl ?? 'https://api.openai.com/v1',
     kimiCommand: map.kimiCommand ?? '请帮我分析这段对话的重点',
-    modelId: map.modelId ?? 'step-3.5-flash-2603',
+    modelId: map.modelId ?? DEFAULT_MODEL_ID,
+    autoReplySystemPrompt: map.autoReplySystemPrompt ?? '你是一个飞书助手，请根据消息内容简洁友好地回复。',
     messageSyncPollingEnabled: map.messageSyncPollingEnabled === 'true',
     messageSyncIntervalSec,
     defaultSyncMode: (map.defaultSyncMode === 'full' ? 'full' : 'latest') as 'latest' | 'full',
@@ -36,6 +38,7 @@ router.put('/', (req, res) => {
     openaiUrl,
     kimiCommand,
     modelId,
+    autoReplySystemPrompt,
     messageSyncPollingEnabled,
     messageSyncIntervalSec,
     defaultSyncMode,
@@ -46,6 +49,7 @@ router.put('/', (req, res) => {
     openaiUrl?: string;
     kimiCommand?: string;
     modelId?: string;
+    autoReplySystemPrompt?: string;
     messageSyncPollingEnabled?: boolean;
     messageSyncIntervalSec?: number;
     defaultSyncMode?: 'latest' | 'full';
@@ -59,6 +63,10 @@ router.put('/', (req, res) => {
     db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('openaiUrl', openaiUrl);
   if (kimiCommand !== undefined)
     db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('kimiCommand', kimiCommand);
+  if (modelId !== undefined)
+    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('modelId', String(modelId));
+  if (autoReplySystemPrompt !== undefined)
+    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('autoReplySystemPrompt', autoReplySystemPrompt);
   if (messageSyncPollingEnabled !== undefined)
     db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(
       'messageSyncPollingEnabled',

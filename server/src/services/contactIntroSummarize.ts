@@ -1,3 +1,4 @@
+import { DEFAULT_MODEL_ID } from '../constants/defaultModelId.js';
 import { getDb } from '../db/connection.js';
 
 function getLlmSettings(): { openaiKey: string; openaiUrl: string; modelId: string } {
@@ -8,7 +9,7 @@ function getLlmSettings(): { openaiKey: string; openaiUrl: string; modelId: stri
   return {
     openaiKey: map.openaiKey ?? '',
     openaiUrl: map.openaiUrl ?? 'https://api.openai.com/v1',
-    modelId: map.modelId ?? 'gpt-4o-mini',
+    modelId: map.modelId ?? DEFAULT_MODEL_ID,
   };
 }
 

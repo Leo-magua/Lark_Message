@@ -42,6 +42,7 @@ export interface AutoReplyChannel extends Channel {
     templateId: number | null;
     knowledgeTags: string[];
     customContext: string;
+    systemPrompt: string;
     enabled: number;
     updatedAt: string;
   } | null;
@@ -71,6 +72,7 @@ export interface AutoReplyConfig {
   templateId: number | null;
   knowledgeTags: string[];
   customContext: string;
+  systemPrompt: string;
   enabled: number; // 0/1
 }
 
@@ -126,6 +128,8 @@ export interface Settings {
   openaiUrl: string;
   kimiCommand: string;
   modelId: string;
+  /** 自动回复功能使用的全局系统提示词（独立于 AI 分析指令） */
+  autoReplySystemPrompt: string;
   /** 后台定时同步通讯录中全部对象的消息 */
   messageSyncPollingEnabled: boolean;
   /** 同步间隔（秒），后端限制 30～7200 */

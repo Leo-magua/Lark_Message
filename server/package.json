@@ -9,6 +9,7 @@
     "cli:list-chats": "node --experimental-sqlite --import tsx/esm src/scripts/list-chats.ts",
     "cli:send": "node --experimental-sqlite --import tsx/esm src/scripts/send-message.ts",
     "cli:sync-contacts": "node --experimental-sqlite --import tsx/esm src/scripts/sync-contacts.ts",
+    "cli:fix-topics": "node --experimental-sqlite --import tsx/esm src/scripts/fix-topics.ts",
     "cli:sync-chats": "node --experimental-sqlite --import tsx/esm -e \"import('./src/services/syncChats.js').then(m=>m.syncChats()).then(r=>{ console.log(r); process.exit(0); })\""  
   },
   "dependencies": {

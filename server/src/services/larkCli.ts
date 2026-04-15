@@ -92,13 +92,14 @@ interface LarkChatsListResponse {
   };
 }
 
-/** Search group chats by name (fetches all and filters client-side) */
+/** Search group chats by name（拉全量会话再本地过滤；须与 `im chats list` 的 `--page-all` 一致，否则只有第一页，搜索常为空） */
 export async function searchChats(
   query: string,
 ): Promise<Array<{ chat_id: string; name: string; avatar?: string; member_count?: number }>> {
   const result = await runLarkCli([
     'im', 'chats', 'list',
     '--format', 'json',
+    '--page-all',
     '--as', 'user',
   ]) as LarkChatsListResponse;
 

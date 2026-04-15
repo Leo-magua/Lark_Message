@@ -1,3 +1,4 @@
+import { DEFAULT_MODEL_ID } from '../constants/defaultModelId.js';
 import { getDb } from '../db/connection.js';
 import { linkNewTopicAcrossAllEvents } from './topicEventAutoLink.js';
 import {
@@ -55,7 +56,7 @@ function getSettings(): { openaiKey: string; openaiUrl: string; modelId: string 
   return {
     openaiKey: map.openaiKey ?? '',
     openaiUrl: map.openaiUrl ?? 'https://api.openai.com/v1',
-    modelId: map.modelId ?? 'gpt-4o-mini',
+    modelId: map.modelId ?? DEFAULT_MODEL_ID,
   };
 }
 

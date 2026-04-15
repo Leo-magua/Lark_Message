@@ -1,5 +1,6 @@
-import { Router } from 'express';
+import { Router, type Request, type Response } from 'express';
 import { getDb } from '../db/connection.js';
+import { runAutoReplyTest } from '../services/autoReply.js';
 
 const router = Router();
 
@@ -10,6 +11,7 @@ interface ConfigRow {
   template_id: number | null;
   knowledge_tags: string;
   custom_context: string;
+  system_prompt: string;
   enabled: number;
   updated_at: string;
 }
@@ -22,6 +24,7 @@ function rowToConfig(row: ConfigRow) {
     templateId: row.template_id,
     knowledgeTags: JSON.parse(row.knowledge_tags) as string[],
     customContext: row.custom_context,
+    systemPrompt: row.system_prompt || '',
     enabled: Boolean(row.enabled),
     updatedAt: row.updated_at,
   };
@@ -118,6 +121,7 @@ router.get('/config/:channelType/:channelId', (req, res) => {
         templateId: null,
         knowledgeTags: [],
         customContext: '',
+        systemPrompt: '',
         enabled: true,
         updatedAt: null,
       }
@@ -132,10 +136,11 @@ router.get('/config/:channelType/:channelId', (req, res) => {
 router.put('/config/:channelType/:channelId', (req, res) => {
   const db = getDb();
   const { channelType, channelId } = req.params;
-  const { templateId, knowledgeTags, customContext, enabled } = req.body as {
+  const { templateId, knowledgeTags, customContext, systemPrompt, enabled } = req.body as {
     templateId?: number | null;
     knowledgeTags?: string[];
     customContext?: string;
+    systemPrompt?: string;
     enabled?: boolean;
   };
 
@@ -154,6 +159,7 @@ router.put('/config/:channelType/:channelId', (req, res) => {
     if (templateId !== undefined) { updates.push('template_id = :templateId'); params.templateId = templateId; }
     if (knowledgeTags !== undefined) { updates.push('knowledge_tags = :knowledgeTags'); params.knowledgeTags = JSON.stringify(knowledgeTags); }
     if (customContext !== undefined) { updates.push('custom_context = :customContext'); params.customContext = customContext; }
+    if (systemPrompt !== undefined) { updates.push('system_prompt = :systemPrompt'); params.systemPrompt = systemPrompt; }
     if (enabled !== undefined) { updates.push('enabled = :enabled'); params.enabled = enabled ? 1 : 0; }
 
     if (updates.length === 0) {
@@ -169,14 +175,15 @@ router.put('/config/:channelType/:channelId', (req, res) => {
   } else {
     // Insert new
     const info = db.prepare(`
-      INSERT INTO auto_reply_config (channel_type, channel_id, template_id, knowledge_tags, custom_context, enabled)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO auto_reply_config (channel_type, channel_id, template_id, knowledge_tags, custom_context, system_prompt, enabled)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(
       channelType,
       channelId,
       templateId ?? null,
       JSON.stringify(knowledgeTags || []),
       customContext || '',
+      systemPrompt || '',
       enabled !== false ? 1 : 0
     );
 
@@ -184,5 +191,47 @@ router.put('/config/:channelType/:channelId', (req, res) => {
     res.json({ success: true, config: rowToConfig(newRow) });
   }
 });
+
+/** POST /api/auto-reply/test — 在 index 顶层注册，避免仅挂在子 Router 时部分环境出现 404 */
+export async function postAutoReplyTest(req: Request, res: Response): Promise<void> {
+  const { channelType, channelId, limit, systemPromptDraft, send } = req.body as {
+    channelType?: string;
+    channelId?: string;
+    limit?: number;
+    systemPromptDraft?: string;
+    send?: boolean;
+  };
+
+  if (channelType !== 'person' && channelType !== 'group') {
+    res.status(400).json({ success: false, error: 'channelType 须为 person 或 group' });
+    return;
+  }
+  if (!channelId || typeof channelId !== 'string') {
+    res.status(400).json({ success: false, error: '缺少 channelId' });
+    return;
+  }
+
+  const testOpts: { systemPromptDraft?: string; send?: boolean } = {};
+  if (typeof systemPromptDraft === 'string') testOpts.systemPromptDraft = systemPromptDraft;
+  if (send === true) testOpts.send = true;
+
+  try {
+    const result = await runAutoReplyTest(channelType, channelId, limit, testOpts);
+    if (!result.ok) {
+      res.status(400).json({ success: false, error: result.error });
+      return;
+    }
+    res.json({
+      success: true,
+      reply: result.reply,
+      messageCount: result.messageCount,
+      sent: result.sent,
+      ...(result.sendError ? { sendError: result.sendError } : {}),
+    });
+  } catch (e) {
+    console.error('[auto-reply/test]', e);
+    res.status(500).json({ success: false, error: String(e) });
+  }
+}
 
 export default router;

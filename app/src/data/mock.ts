@@ -121,6 +121,7 @@ export const mockSettings: Settings = {
   openaiUrl: 'https://api.openai.com/v1',
   kimiCommand: '请帮我分析这段对话的重点',
   modelId: 'step-3.5-flash-2603',
+  autoReplySystemPrompt: '你是一个飞书助手，请根据消息内容简洁友好地回复。',
   messageSyncPollingEnabled: false,
   messageSyncIntervalSec: 60,
   defaultSyncMode: 'latest',

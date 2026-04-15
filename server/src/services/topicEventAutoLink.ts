@@ -1,3 +1,4 @@
+import { DEFAULT_MODEL_ID } from '../constants/defaultModelId.js';
 import { getDb } from '../db/connection.js';
 
 /** OpenAI 兼容 Chat Completions + 解析模型 JSON 输出（与 aiAnalyze 同配置源） */
@@ -9,7 +10,7 @@ function getAiSettings(): { openaiKey: string; openaiUrl: string; modelId: strin
   return {
     openaiKey: map.openaiKey ?? '',
     openaiUrl: map.openaiUrl ?? 'https://api.openai.com/v1',
-    modelId: map.modelId ?? 'gpt-4o-mini',
+    modelId: map.modelId ?? DEFAULT_MODEL_ID,
   };
 }
 

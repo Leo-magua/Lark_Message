@@ -444,12 +444,45 @@ export const api = {
     setConfig: async (
       channelType: 'person' | 'group',
       channelId: string,
-      data: { templateId: number | null; knowledgeTags: string[]; customContext: string; enabled: boolean }
+      data: { templateId: number | null; knowledgeTags: string[]; customContext: string; systemPrompt?: string; enabled: boolean }
     ): Promise<{ success: boolean }> => {
       return apiFetch<{ success: boolean }>(`${BASE}/auto-reply/config/${channelType}/${channelId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
+      });
+    },
+
+    /** 基于本地消息与当前提示词生成回复预览（不发送飞书） */
+    test: async (
+      channelType: 'person' | 'group',
+      channelId: string,
+      opts?: { limit?: number; systemPromptDraft?: string; send?: boolean }
+    ): Promise<{
+      success: boolean;
+      reply?: string;
+      messageCount?: number;
+      sent?: boolean;
+      sendError?: string;
+      error?: string;
+    }> => {
+      return apiFetch<{
+        success: boolean;
+        reply?: string;
+        messageCount?: number;
+        sent?: boolean;
+        sendError?: string;
+        error?: string;
+      }>(`${BASE}/auto-reply/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channelType,
+          channelId,
+          ...(opts?.limit != null ? { limit: opts.limit } : {}),
+          ...(opts?.systemPromptDraft !== undefined ? { systemPromptDraft: opts.systemPromptDraft } : {}),
+          ...(opts?.send === true ? { send: true } : {}),
+        }),
       });
     },
   },

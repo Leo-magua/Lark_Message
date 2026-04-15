@@ -103,8 +103,8 @@ router.put('/:chatId', (req, res) => {
   if (autoReply !== undefined) {
     if (autoReply) {
       db.prepare(`
-        INSERT OR IGNORE INTO auto_reply_config (channel_type, channel_id, template_id, knowledge_tags, custom_context, enabled)
-        VALUES ('group', ?, NULL, '[]', '', 1)
+        INSERT OR IGNORE INTO auto_reply_config (channel_type, channel_id, template_id, knowledge_tags, custom_context, system_prompt, enabled)
+        VALUES ('group', ?, NULL, '[]', '', '', 1)
       `).run(chatId);
     } else {
       db.prepare("DELETE FROM auto_reply_config WHERE channel_type = 'group' AND channel_id = ?").run(chatId);

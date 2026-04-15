@@ -262,17 +262,19 @@ router.patch('/:id', (req, res) => {
     UPDATE contacts SET ${updates.join(', ')} WHERE open_id = :open_id
   `).run(params);
 
-  // Sync auto_reply config: ensure config exists when auto_reply=1, remove when=0
+  // Sync auto_reply_config：channel_type 须与 contacts.contact_type 一致（否则 getChannelConfig 查不到）
   if (autoReply !== undefined) {
+    const ct = db.prepare('SELECT contact_type FROM contacts WHERE open_id = ?').get(id) as
+      | { contact_type: string }
+      | undefined;
+    const channelType = ct?.contact_type === 'group' ? 'group' : 'person';
     if (autoReply) {
-      // Create default config if not exists
       db.prepare(`
-        INSERT OR IGNORE INTO auto_reply_config (channel_type, channel_id, template_id, knowledge_tags, custom_context, enabled)
-        VALUES ('person', ?, NULL, '[]', '', 1)
-      `).run(id);
+        INSERT OR IGNORE INTO auto_reply_config (channel_type, channel_id, template_id, knowledge_tags, custom_context, system_prompt, enabled)
+        VALUES (?, ?, NULL, '[]', '', '', 1)
+      `).run(channelType, id);
     } else {
-      // Remove config (or could just disable)
-      db.prepare("DELETE FROM auto_reply_config WHERE channel_type = 'person' AND channel_id = ?").run(id);
+      db.prepare('DELETE FROM auto_reply_config WHERE channel_type = ? AND channel_id = ?').run(channelType, id);
     }
   }
 

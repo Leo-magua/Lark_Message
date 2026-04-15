@@ -1,3 +1,4 @@
+import { DEFAULT_MODEL_ID } from '../constants/defaultModelId.js';
 import { getDb } from './connection.js';
 import { backfillDirectoryFromStoredRawEvents, relabelAllMessages } from '../services/senderDirectory.js';
 
@@ -86,6 +87,7 @@ export function runMigrations(): void {
       template_id    INTEGER,
       knowledge_tags TEXT NOT NULL DEFAULT '[]',
       custom_context TEXT NOT NULL DEFAULT '',
+      system_prompt  TEXT NOT NULL DEFAULT '',
       enabled        INTEGER NOT NULL DEFAULT 1,
       updated_at     TEXT DEFAULT (datetime('now')),
       UNIQUE (channel_type, channel_id)
@@ -123,7 +125,7 @@ export function runMigrations(): void {
   } catch { /* Column already exists — ignore */ }
 
   try {
-    db.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES ('modelId', 'step-3.5-flash-2603')`).run();
+    db.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES ('modelId', ?)`).run(DEFAULT_MODEL_ID);
   } catch { /* Ignore */ }
 
   try {
@@ -250,6 +252,19 @@ export function runMigrations(): void {
   }
 
   try {
+    db.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES ('autoReplySystemPrompt', '你是一个飞书助手，请根据消息内容简洁友好地回复。')`).run();
+  } catch {
+    /* ignore */
+  }
+
+  try {
+    db.exec(`ALTER TABLE auto_reply_config ADD COLUMN system_prompt TEXT NOT NULL DEFAULT ''`);
+    console.log('[DB] Added auto_reply_config.system_prompt (channel-level system prompt override)');
+  } catch {
+    /* Column already exists */
+  }
+
+  try {
     db.exec(`
       ALTER TABLE messages ADD COLUMN ai_analysis_status TEXT NOT NULL DEFAULT 'unprocessed'
     `);
@@ -263,6 +278,34 @@ export function runMigrations(): void {
     console.log('[DB] Added messages.platform (原始消息来源平台，当前默认 lark)');
   } catch {
     /* Column already exists */
+  }
+
+  try {
+    db.exec(`ALTER TABLE messages ADD COLUMN auto_replied INTEGER NOT NULL DEFAULT 0`);
+    console.log('[DB] Added messages.auto_replied (是否已被自动回复处理)');
+  } catch {
+    /* Column already exists */
+  }
+
+  try {
+    db.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES ('selfOpenId', '')`).run();
+  } catch {
+    /* ignore */
+  }
+
+  try {
+    const r = db
+      .prepare(
+        `UPDATE auto_reply_config SET channel_type = 'group'
+         WHERE channel_type = 'person'
+           AND EXISTS (SELECT 1 FROM contacts c WHERE c.open_id = auto_reply_config.channel_id AND c.contact_type = 'group')`
+      )
+      .run();
+    if (r.changes > 0) {
+      console.log(`[DB] Fixed auto_reply_config.channel_type for ${r.changes} group contact(s) (was wrongly 'person')`);
+    }
+  } catch (e) {
+    console.warn('[DB] auto_reply_config channel_type fix:', e);
   }
 
   try {
