@@ -312,8 +312,8 @@ export async function syncAllMonitoredChats(opts?: {
 }): Promise<{ results: MessageSyncResult[]; totalInserted: number }> {
   const db = getDb();
 
-  const defaultLatest = getSettingInt('defaultSyncLimit', 30);
-  const fullCap = opts?.fullSyncCap ?? getSettingInt('fullSyncCap', 5000);
+  const defaultLatest = getSettingInt('defaultSyncLimit', 5); // Very conservative: 5 messages
+  const fullCap = opts?.fullSyncCap ?? getSettingInt('fullSyncCap', 100); // Max 100 messages for full sync
   const defaultModeRaw = (() => {
     const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('defaultSyncMode') as { value: string } | undefined;
     const v = (row?.value ?? 'latest').toLowerCase();
@@ -349,10 +349,11 @@ export async function syncAllMonitoredChats(opts?: {
       results.push(result);
     }
 
-    await new Promise(r => setTimeout(r, 200));
+    // Very long delay (3s) between contacts to prevent OOM
+    await new Promise(r => setTimeout(r, 3000));
   }
 
-  const totalInserted = results.reduce((sum, r) => sum + r.inserted, 0);
+  const totalInserted = results.reduce((sum, r) => sum + (r.inserted || 0), 0);
   console.log(`[syncMessages] Done. ${rows.length} targets. Total inserted: ${totalInserted}`);
   return { results, totalInserted };
 }

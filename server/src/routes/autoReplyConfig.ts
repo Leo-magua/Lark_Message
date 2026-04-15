@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { getDb } from '../db/connection.js';
-import { runAutoReplyTest } from '../services/autoReply.js';
+import { runAutoReplyTest, sendManualMessage } from '../services/autoReply.js';
 
 const router = Router();
 
@@ -235,3 +235,33 @@ export async function postAutoReplyTest(req: Request, res: Response): Promise<vo
 }
 
 export default router;
+
+/** POST /api/auto-reply/send-manual — 直接发送指定文本到飞书会话（不走 AI） */
+export async function postSendManual(req: Request, res: Response): Promise<void> {
+  const { channelType, channelId, text } = req.body as {
+    channelType?: string;
+    channelId?: string;
+    text?: string;
+  };
+
+  if (channelType !== 'person' && channelType !== 'group') {
+    res.status(400).json({ success: false, error: 'channelType 须为 person 或 group' });
+    return;
+  }
+  if (!channelId || typeof channelId !== 'string') {
+    res.status(400).json({ success: false, error: '缺少 channelId' });
+    return;
+  }
+  if (!text || typeof text !== 'string' || !text.trim()) {
+    res.status(400).json({ success: false, error: '消息内容不能为空' });
+    return;
+  }
+
+  try {
+    await sendManualMessage(channelType as 'person' | 'group', channelId, text.trim());
+    res.json({ success: true });
+  } catch (e) {
+    console.error('[auto-reply/send-manual]', e);
+    res.status(500).json({ success: false, error: String(e) });
+  }
+}

@@ -119,11 +119,15 @@ function StatusPage({
     console.log('全局自动回复模式切换为：', newValue ? '开启' : '关闭');
   };
 
-  const [testReplyLoading, setTestReplyLoading] = useState(false);
+  const [testPreviewLoading, setTestPreviewLoading] = useState(false);
+  const [testSendLoading, setTestSendLoading] = useState(false);
   const [testReplyText, setTestReplyText] = useState<string | null>(null);
   const [testReplyError, setTestReplyError] = useState<string | null>(null);
   const [testReplySent, setTestReplySent] = useState(false);
   const [testSendError, setTestSendError] = useState<string | null>(null);
+  const [manualSendText, setManualSendText] = useState('');
+  const [manualSendLoading, setManualSendLoading] = useState(false);
+  const [manualSendResult, setManualSendResult] = useState<string | null>(null);
 
   useEffect(() => {
     setTestReplyText(null);
@@ -398,10 +402,10 @@ function StatusPage({
                 <div className="flex gap-2">
                   <button
                     type="button"
-                    disabled={testReplyLoading}
+                    disabled={testPreviewLoading || testSendLoading}
                     onClick={async () => {
                       if (!selectedAutoReplyChannel) return;
-                      setTestReplyLoading(true);
+                      setTestPreviewLoading(true);
                       setTestReplyError(null);
                       setTestReplyText(null);
                       setTestReplySent(false);
@@ -417,17 +421,16 @@ function StatusPage({
                           return;
                         }
                         setTestReplyText(r.reply);
-                        setTestReplySent(Boolean(r.sent));
-                        if (r.sendError) setTestSendError(r.sendError);
+                        setTestReplySent(false);
                       } catch (e) {
                         setTestReplyError(String(e));
                       } finally {
-                        setTestReplyLoading(false);
+                        setTestPreviewLoading(false);
                       }
                     }}
                     className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-xl border border-violet-200 bg-violet-50 text-violet-900 text-sm hover:bg-violet-100 disabled:opacity-50 transition-colors"
                   >
-                    {testReplyLoading ? (
+                    {testPreviewLoading ? (
                       <Loader2 className="w-4 h-4 animate-spin" />
                     ) : (
                       <Sparkles className="w-4 h-4" />
@@ -436,10 +439,10 @@ function StatusPage({
                   </button>
                   <button
                     type="button"
-                    disabled={testReplyLoading}
+                    disabled={testPreviewLoading || testSendLoading}
                     onClick={async () => {
                       if (!selectedAutoReplyChannel) return;
-                      setTestReplyLoading(true);
+                      setTestSendLoading(true);
                       setTestReplyError(null);
                       setTestReplyText(null);
                       setTestReplySent(false);
@@ -460,21 +463,21 @@ function StatusPage({
                       } catch (e) {
                         setTestReplyError(String(e));
                       } finally {
-                        setTestReplyLoading(false);
+                        setTestSendLoading(false);
                       }
                     }}
                     className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-xl border border-emerald-300 bg-emerald-50 text-emerald-900 text-sm hover:bg-emerald-100 disabled:opacity-50 transition-colors"
                   >
-                    {testReplyLoading ? (
+                    {testSendLoading ? (
                       <Loader2 className="w-4 h-4 animate-spin" />
                     ) : (
                       <Send className="w-4 h-4" />
                     )}
-                    发到飞书
+                    AI生成并发送
                   </button>
                 </div>
                 <p className="text-[11px] text-neutral-400">
-                  使用上方提示词草稿（未保存也会参与）与本地最近 30 条消息生成回复。「发到飞书」会在本机用 lark-cli 以你的身份发送，不写自动回复已读标记。
+                  使用上方提示词草稿与本地最近 30 条消息生成回复。「AI生成并发送」通过 lark-cli 以机器人身份发送到飞书，不写自动回复已读标记。
                 </p>
                 {testReplyError ? (
                   <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{testReplyError}</div>
@@ -492,6 +495,55 @@ function StatusPage({
                     <p className="text-sm text-neutral-900 whitespace-pre-wrap leading-relaxed">{testReplyText}</p>
                   </div>
                 ) : null}
+
+                {/* Manual send input */}
+                <div className="border-t border-neutral-100 pt-3 space-y-2">
+                  <p className="text-xs font-medium text-neutral-500">手动发送（直接填写内容发到飞书，不经过 AI）</p>
+                  <div className="flex gap-2">
+                    <textarea
+                      value={manualSendText}
+                      onChange={(e) => { setManualSendText(e.target.value); setManualSendResult(null); }}
+                      placeholder="输入要发送的消息内容..."
+                      rows={2}
+                      className="flex-1 px-3 py-2 bg-neutral-50 border border-neutral-200 rounded-xl text-sm focus:outline-none focus:border-neutral-400 resize-none"
+                    />
+                    <button
+                      type="button"
+                      disabled={manualSendLoading || !manualSendText.trim()}
+                      onClick={async () => {
+                        if (!selectedAutoReplyChannel || !manualSendText.trim()) return;
+                        setManualSendLoading(true);
+                        setManualSendResult(null);
+                        try {
+                          const r = await api.autoReply.sendManual(
+                            selectedAutoReplyChannel.type as 'person' | 'group',
+                            selectedAutoReplyChannel.id,
+                            manualSendText.trim()
+                          );
+                          if (r.success) {
+                            setManualSendResult('已发送');
+                            setManualSendText('');
+                          } else {
+                            setManualSendResult('失败：' + (r.error ?? '未知错误'));
+                          }
+                        } catch (e) {
+                          setManualSendResult('失败：' + String(e));
+                        } finally {
+                          setManualSendLoading(false);
+                        }
+                      }}
+                      className="flex-shrink-0 px-4 py-2 rounded-xl bg-neutral-900 text-white text-sm hover:bg-neutral-800 disabled:opacity-50 transition-colors flex items-center gap-1.5"
+                    >
+                      {manualSendLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                      发送
+                    </button>
+                  </div>
+                  {manualSendResult && (
+                    <p className={`text-xs ${manualSendResult === '已发送' ? 'text-emerald-600' : 'text-red-600'}`}>
+                      {manualSendResult}
+                    </p>
+                  )}
+                </div>
               </div>
 
               {/* Config summary (readonly info) */}
@@ -2282,8 +2334,9 @@ function App() {
       }
     };
     void loadTemplatesLocal();
-    const interval = setInterval(() => void loadAutoReplyChannels(), 60000);
-    return () => clearInterval(interval);
+    // DISABLED auto-reload to prevent crashes
+    // const interval = setInterval(() => void loadAutoReplyChannels(), 60000);
+    // return () => clearInterval(interval);
   }, [loadAutoReplyChannels]);
 
   const handleToggleStatusChannel = useCallback(async (channelId: string) => {

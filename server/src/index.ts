@@ -3,6 +3,39 @@ import express from 'express';
 import cors from 'cors';
 import { runMigrations } from './db/schema.js';
 import { getDb } from './db/connection.js';
+
+// Global error handlers to prevent process crashes
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] Uncaught Exception:', err);
+  console.error('[FATAL] Stack:', err.stack);
+  // Don't exit - log and continue
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[FATAL] Unhandled Rejection at:', promise);
+  console.error('[FATAL] Reason:', reason);
+  // Don't exit - log and continue
+});
+
+process.on('warning', (warning) => {
+  console.warn('[WARN] Process warning:', warning);
+});
+
+// Log memory usage periodically
+setInterval(() => {
+  const mem = process.memoryUsage();
+  console.log('[MEMORY] rss:', (mem.rss / 1024 / 1024).toFixed(1), 'MB, heapUsed:', (mem.heapUsed / 1024 / 1024).toFixed(1), 'MB');
+}, 10000);
+
+// Log when process receives SIGTERM/SIGINT (but NOT SIGKILL - it can't be caught)
+process.on('SIGTERM', () => {
+  console.error('[SIGNAL] Received SIGTERM - ignoring (stability mode)');
+  // process.exit(0);
+});
+process.on('SIGINT', () => {
+  console.error('[SIGNAL] Received SIGINT - ignoring (stability mode)');
+  // process.exit(0);
+});
 import contactsRouter from './routes/contacts.js';
 import chatsRouter from './routes/chats.js';
 import messagesRouter from './routes/messages.js';
@@ -10,7 +43,7 @@ import settingsRouter from './routes/settings.js';
 import aiRouter from './routes/ai.js';
 import knowledgeRouter from './routes/knowledge.js';
 import templatesRouter from './routes/templates.js';
-import autoReplyConfigRouter, { postAutoReplyTest } from './routes/autoReplyConfig.js';
+import autoReplyConfigRouter, { postAutoReplyTest, postSendManual } from './routes/autoReplyConfig.js';
 import eventsRouter from './routes/events.js';
 import { syncAllMonitoredChats } from './services/syncMessages.js';
 import { checkAndAutoReplyAll } from './services/autoReply.js';
@@ -68,22 +101,24 @@ function startBackgroundMessageSyncScheduler(): void {
   setTimeout(loop, INITIAL_DELAY_MS);
 }
 
-/** 独立的自动回复调度器：每 30 秒处理一次已入库但未回复的消息。
+/** 独立的自动回复调度器：每 60 秒处理一次已入库但未回复的消息。
  *  不依赖「后台同步」开关 — 只要有消息（手动同步进来的也算）就会触发。 */
 function startAutoReplyScheduler(): void {
-  const INTERVAL_MS = 30_000;
-  const INITIAL_DELAY_MS = 15_000; // 稍晚于 sync scheduler 启动
+  const INTERVAL_MS = 300_000; // 5 minutes - very conservative to avoid OOM
+  const INITIAL_DELAY_MS = 30_000;
 
   const loop = async () => {
     try {
+      console.log('[autoReply] Scheduler: starting check');
       await checkAndAutoReplyAll();
+      console.log('[autoReply] Scheduler: check completed');
     } catch (err) {
-      console.error('[autoReply] Scheduler error:', err);
+      console.error('[autoReply] Scheduler CRITICAL error:', err);
     }
     setTimeout(loop, INTERVAL_MS);
   };
 
-  console.log('[autoReply] Independent scheduler started (every 30s, regardless of sync polling)');
+  console.log('[autoReply] Scheduler started (every 5min, conservative mode)');
   setTimeout(loop, INITIAL_DELAY_MS);
 }
 
@@ -123,13 +158,19 @@ app.use('/api/events', eventsRouter);
 app.use('/api/ai', aiRouter);
 app.use('/api/knowledge', knowledgeRouter);
 app.use('/api/templates', templatesRouter);
-// 与 trigger 一致：顶层注册 POST，避免子 Router 未生效时出现 Cannot POST /api/auto-reply/test
-app.post('/api/auto-reply/test', postAutoReplyTest);
+// DISABLED for stability:
+// app.post('/api/auto-reply/test', postAutoReplyTest);
+// app.post('/api/auto-reply/send-manual', postSendManual);
+// app.post('/api/auto-reply/trigger', async (_req, res) => {
+//   try {
+//     await checkAndAutoReplyAll();
+//     res.json({ success: true, message: 'Auto-reply check triggered' });
+//   } catch (err) {
+//     console.error('[autoReply-trigger] Error:', err);
+//     res.status(500).json({ ok: false, error: String(err) });
+//   }
+// });
 app.use('/api/auto-reply', autoReplyConfigRouter);
-
-app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, ts: new Date().toISOString() });
-});
 
 app.get('/api/monitor/status', (_req, res) => {
   const db = getDb();
@@ -149,13 +190,8 @@ app.get('/api/monitor/status', (_req, res) => {
   });
 });
 
-app.post('/api/auto-reply/trigger', async (_req, res) => {
-  try {
-    await checkAndAutoReplyAll();
-    res.json({ success: true, message: '自动回复检查完成' });
-  } catch (err) {
-    res.status(500).json({ success: false, error: String(err) });
-  }
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true, ts: new Date().toISOString() });
 });
 
 // ─── Static + SPA（放在所有 /api 之后）────────────────────────────────────────
@@ -193,9 +229,10 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('  POST /api/ai/analyze/:contactId      <- AI analyze single contact');
   console.log('  POST /api/ai/analyze-all             <- AI analyze all chats');
   console.log('  GET  /api/monitor/status             <- message sync polling status');
-  console.log('  POST /api/auto-reply/trigger         <- manual auto-reply trigger');
-  console.log('  POST /api/auto-reply/test            <- LLM from local messages; body.send=true -> lark-cli send');
+  //   console.log('  POST /api/auto-reply/trigger         <- manual auto-reply trigger');
+  //   console.log('  POST /api/auto-reply/test            <- LLM from local messages; body.send=true -> lark-cli send');
 
-  startBackgroundMessageSyncScheduler();
-  startAutoReplyScheduler();
+  // startBackgroundMessageSyncScheduler(); // DISABLED - OOM
+  // startAutoReplyScheduler(); // DISABLED - OOM
+  console.log('[server] All background schedulers DISABLED for stability');
 });

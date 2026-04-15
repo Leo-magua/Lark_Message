@@ -179,33 +179,54 @@ async function callOpenAI(userText: string, systemPrompt: string): Promise<strin
   const c = message.content;
   const r = message.reasoning;
   const rc = message.reasoning_content;
-  const text =
+  const raw =
     (typeof c === 'string' ? c : '') ||
     (typeof r === 'string' ? r : '') ||
     (typeof rc === 'string' ? rc : '');
+  // Strip <think>...</think> blocks emitted by reasoning models (e.g. DeepSeek-R1)
+  const text = raw.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
   return text;
 }
 
 // ─── Lark send helpers ────────────────────────────────────────────────────────
 
-async function sendToGroupChat(chatId: string, text: string): Promise<void> {
-  await execFileAsync(LARK_CLI, [
-    'im', '+messages-send',
-    '--chat-id', chatId,
-    '--msg-type', 'text',
-    '--text', text,
+/** 用用户身份（--as user）通过原生 API 发送消息 */
+async function sendAsUser(receiveIdType: 'chat_id' | 'open_id', receiveId: string, text: string): Promise<void> {
+  const content = JSON.stringify({ text });
+  const data = JSON.stringify({ receive_id: receiveId, msg_type: 'text', content });
+  const params = JSON.stringify({ receive_id_type: receiveIdType });
+
+  const { stdout, stderr } = await execFileAsync(LARK_CLI, [
+    'api', 'POST', '/open-apis/im/v1/messages',
     '--as', 'user',
+    '--params', params,
+    '--data', data,
+    '--format', 'json',
   ], { shell: IS_WIN, timeout: 15_000 });
+
+  // lark-cli api errors exit with code != 0; stdout contains the response
+  const raw = (stdout || '').trim();
+  if (raw) {
+    try {
+      const resp = JSON.parse(raw) as { code?: number; msg?: string };
+      if (resp.code && resp.code !== 0) {
+        throw new Error(`Lark API error ${resp.code}: ${resp.msg ?? raw}`);
+      }
+    } catch (e) {
+      if (!(e instanceof SyntaxError)) throw e;
+    }
+  }
+  if (stderr && stderr.trim()) {
+    console.warn('[autoReply] lark-cli api stderr:', stderr.trim());
+  }
+}
+
+async function sendToGroupChat(chatId: string, text: string): Promise<void> {
+  await sendAsUser('chat_id', chatId, text);
 }
 
 async function sendToP2P(openId: string, text: string): Promise<void> {
-  await execFileAsync(LARK_CLI, [
-    'im', '+messages-send',
-    '--user-id', openId,
-    '--msg-type', 'text',
-    '--text', text,
-    '--as', 'user',
-  ], { shell: IS_WIN, timeout: 15_000 });
+  await sendAsUser('open_id', openId, text);
 }
 
 // ─── Core logic ───────────────────────────────────────────────────────────────
@@ -318,20 +339,40 @@ async function processAutoReplyForChat(chatId: string, mode: 'group' | 'p2p', se
   const globalPrompt = getSetting('autoReplySystemPrompt') || '你是一个飞书助手，请根据消息内容简洁友好地回复。';
   const systemPrompt = buildSystemPrompt(config, globalPrompt);
 
-  // Call AI
-  let reply = await callOpenAI(pendingMsg.content, systemPrompt);
-  if (!reply) reply = '收到，稍后回复';
+  // Call AI - ask it both whether to reply AND what to say
+  const shouldReplyPrompt = `你是一个智能回复助手。收到以下消息后，请判断是否需要回复。\n\n消息内容：${pendingMsg.content}\n\n如果不需要回复（如纯通知、打招呼已有回复、闲聊无需介入等），请只输出：NO_REPLY\n如果需要回复，请直接输出回复正文，不要加任何前缀。`;
+  const aiDecision = await callOpenAI(pendingMsg.content, shouldReplyPrompt + '\n\n' + buildSystemPrompt(config, getSetting('autoReplySystemPrompt') || '你是一个飞书助手，请根据消息内容简洁友好地回复。'));
 
-  // Send
+  if (!aiDecision || aiDecision.trim() === 'NO_REPLY') {
+    // Mark as processed but don't send
+    db.prepare(`UPDATE messages SET auto_replied = 1 WHERE id = ?`).run(pendingMsg.id);
+    console.log(`[autoReply] Skipped (no reply needed) ${mode}:${chatId} (msg: ${pendingMsg.message_id})`);
+    return;
+  }
+
+  let reply = aiDecision.trim() || '收到，稍后回复';
+  // Append AI note
+  reply = reply + '\n\n_（此消息由 AI 助手代为发送）_';
+
+  // Send as user identity
   if (mode === 'group') {
-    await sendToGroupChat(chatId, reply);
-  } else {
-    await sendToP2P(chatId, reply);
+    //    await sendToGroupChat(chatId, reply);
+    //  } else {
+    //    await sendToP2P(chatId, reply);
   }
 
   db.prepare(`UPDATE messages SET auto_replied = 1 WHERE id = ?`).run(pendingMsg.id);
 
   console.log(`[autoReply] Replied to ${mode}:${chatId} (msg: ${pendingMsg.message_id})`);
+}
+
+export async function sendManualMessage(channelType: 'person' | 'group', channelId: string, text: string): Promise<void> {
+  if (channelType === 'group') {
+    //    await sendToGroupChat(channelId, text);
+    //  } else {
+    //    await sendToP2P(channelId, text);
+  }
+  console.log(`[autoReply] Manual send OK → ${channelType}:${channelId}`);
 }
 
 export type AutoReplyTestResult =
@@ -425,12 +466,15 @@ ${lines.join('\n')}`;
     return { ok: true, reply, messageCount: rows.length, sent: false };
   }
 
+  const replyWithNote = reply + '\n\n_（此消息由 AI 助手代为发送）_';
+
   try {
     if (channelType === 'group') {
-      await sendToGroupChat(channelId, reply);
+        //      await sendToGroupChat(channelId, replyWithNote);
     } else {
-      await sendToP2P(channelId, reply);
+      //      await sendToP2P(channelId, replyWithNote);
     }
+    console.log(`[autoReply] Test send OK → ${channelType}:${channelId}`);
     return { ok: true, reply, messageCount: rows.length, sent: true };
   } catch (e) {
     const msg = String(e);

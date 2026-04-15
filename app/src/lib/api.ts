@@ -453,6 +453,19 @@ export const api = {
       });
     },
 
+    /** 直接发送指定文本到飞书会话（不经过 AI） */
+    sendManual: async (
+      channelType: 'person' | 'group',
+      channelId: string,
+      text: string
+    ): Promise<{ success: boolean; error?: string }> => {
+      return apiFetch<{ success: boolean; error?: string }>(`${BASE}/auto-reply/send-manual`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channelType, channelId, text }),
+      });
+    },
+
     /** 基于本地消息与当前提示词生成回复预览（不发送飞书） */
     test: async (
       channelType: 'person' | 'group',
