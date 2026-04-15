@@ -1,6 +1,10 @@
 import { DEFAULT_MODEL_ID } from '../constants/defaultModelId.js';
 import { getDb } from '../db/connection.js';
 import { getCurrentUser } from './larkCli.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -9,6 +13,15 @@ const IS_WIN = process.platform === 'win32';
 const LARK_CLI = IS_WIN
   ? String.raw`C:\Users\\74116\\AppData\\Roaming\\npm\\lark-cli.cmd`
   : 'lark-cli';
+
+/** `dist/services` 或 `src/services` → `server/scripts/send-im-user.exp` */
+const SEND_IM_EXPECT_SCRIPT = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+  'scripts',
+  'send-im-user.exp'
+);
 
 // ─── Self open_id cache ───────────────────────────────────────────────────────
 
@@ -183,41 +196,142 @@ async function callOpenAI(userText: string, systemPrompt: string): Promise<strin
     (typeof c === 'string' ? c : '') ||
     (typeof r === 'string' ? r : '') ||
     (typeof rc === 'string' ? rc : '');
-  // Strip <think>...</think> blocks emitted by reasoning models (e.g. DeepSeek-R1)
-  const text = raw.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
-  return text;
+  let text = raw.trim();
+  const stripTagged = (s: string, tag: string): string => {
+    const open = `<${tag}>`;
+    const close = `</${tag}>`;
+    let out = s;
+    for (;;) {
+      const i = out.indexOf(open);
+      if (i === -1) break;
+      const j = out.indexOf(close, i + open.length);
+      if (j === -1) break;
+      out = out.slice(0, i) + out.slice(j + close.length);
+    }
+    return out;
+  };
+  // DeepSeek / 部分网关：``、``、``
+  text = stripTagged(text, '思考');
+  text = stripTagged(text, 'redacted_thinking');
+  text = stripTagged(text, 'redacted_reasoning');
+  text = stripTagged(text, 'think');
+  return text.trim();
 }
 
-// ─── Lark send helpers ────────────────────────────────────────────────────────
-
-/** 用用户身份（--as user）通过原生 API 发送消息 */
-async function sendAsUser(receiveIdType: 'chat_id' | 'open_id', receiveId: string, text: string): Promise<void> {
-  const content = JSON.stringify({ text });
-  const data = JSON.stringify({ receive_id: receiveId, msg_type: 'text', content });
-  const params = JSON.stringify({ receive_id_type: receiveIdType });
-
-  const { stdout, stderr } = await execFileAsync(LARK_CLI, [
-    'api', 'POST', '/open-apis/im/v1/messages',
-    '--as', 'user',
-    '--params', params,
-    '--data', data,
-    '--format', 'json',
-  ], { shell: IS_WIN, timeout: 15_000 });
-
-  // lark-cli api errors exit with code != 0; stdout contains the response
-  const raw = (stdout || '').trim();
-  if (raw) {
-    try {
-      const resp = JSON.parse(raw) as { code?: number; msg?: string };
-      if (resp.code && resp.code !== 0) {
-        throw new Error(`Lark API error ${resp.code}: ${resp.msg ?? raw}`);
+/** 从 start 起截取第一个平衡的 `{ ... }`（字符串内括号不计入深度） */
+function firstBalancedJsonObject(s: string, start: number): string | null {
+  if (start < 0 || start >= s.length || s[start] !== '{') return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+    if (inString) {
+      if (escape) {
+        escape = false;
+        continue;
       }
-    } catch (e) {
-      if (!(e instanceof SyntaxError)) throw e;
+      if (ch === '\\') {
+        escape = true;
+        continue;
+      }
+      if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return s.slice(start, i + 1);
     }
   }
-  if (stderr && stderr.trim()) {
-    console.warn('[autoReply] lark-cli api stderr:', stderr.trim());
+  return null;
+}
+
+/**
+ * expect 的 expect_out(buffer) 常带有 `spawn lark-cli ... --params {"receive_id_type":...}` 前缀，
+ * 其中含 `{`，不能整段 JSON.parse。Lark 开放接口响应顶层必有 `code` 字段，以此为锚截取。
+ */
+function extractLarkApiJsonPayload(stdout: string): string {
+  const raw = stdout.trim();
+  // 纯 stdout（无 expect spawn 前缀）时整段即 JSON
+  if (raw.startsWith('{')) {
+    const blob = firstBalancedJsonObject(raw, 0);
+    if (blob) return blob;
+  }
+  // buffer 里常见 `--params {"receive_id_type":...}`，不能用「第一个 {」当响应
+  const m = raw.match(/\{\s*"code"\s*:/);
+  if (m?.index !== undefined) {
+    const blob = firstBalancedJsonObject(raw, m.index);
+    if (blob) return blob;
+  }
+  return raw;
+}
+
+function parseLarkSendStdout(stdout: string, stderr: string): void {
+  if (stderr?.trim()) {
+    console.warn('[autoReply] lark-cli stderr:', stderr.trim().slice(0, 800));
+  }
+  const raw = (stdout || '').trim();
+  if (!raw) {
+    throw new Error(
+      'lark-cli 无输出（在 macOS/Linux 上需已安装 expect，且已执行: lark-cli auth login --scope "im:message"）'
+    );
+  }
+  const payload = extractLarkApiJsonPayload(raw);
+  let resp: { code?: number; msg?: string };
+  try {
+    resp = JSON.parse(payload) as { code?: number; msg?: string };
+  } catch {
+    throw new Error(`lark-cli 返回非 JSON: ${raw.slice(0, 500)}`);
+  }
+  if (resp.code !== undefined && resp.code !== 0) {
+    throw new Error(`Lark API error ${resp.code}: ${resp.msg ?? raw}`);
+  }
+}
+
+/** 用用户身份（--as user）发文本：非 Windows 走 expect + lark-cli api（避免无 TTY 静默失败） */
+async function sendAsUser(receiveIdType: 'chat_id' | 'open_id', receiveId: string, text: string): Promise<void> {
+  const params = JSON.stringify({ receive_id_type: receiveIdType });
+  const inner = JSON.stringify({ text });
+  const data = JSON.stringify({
+    receive_id: receiveId,
+    msg_type: 'text',
+    content: inner,
+  });
+
+  if (IS_WIN) {
+    const { stdout, stderr } = await execFileAsync(
+      LARK_CLI,
+      ['api', 'POST', '/open-apis/im/v1/messages', '--as', 'user', '--params', params, '--data', data, '--format', 'json'],
+      { shell: true, timeout: 25_000 }
+    );
+    parseLarkSendStdout(stdout ?? '', stderr ?? '');
+    return;
+  }
+
+  if (!fs.existsSync(SEND_IM_EXPECT_SCRIPT)) {
+    throw new Error(`找不到发送脚本（请确认仓库内存在）: ${SEND_IM_EXPECT_SCRIPT}`);
+  }
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'larkmsg-im-'));
+  try {
+    const pFile = path.join(dir, 'params.json');
+    const dFile = path.join(dir, 'body.json');
+    fs.writeFileSync(pFile, params, 'utf8');
+    fs.writeFileSync(dFile, data, 'utf8');
+
+    const { stdout, stderr } = await execFileAsync(
+      'expect',
+      ['-f', SEND_IM_EXPECT_SCRIPT, pFile, dFile],
+      { timeout: 35_000, maxBuffer: 8 * 1024 * 1024 }
+    );
+    parseLarkSendStdout(stdout ?? '', stderr ?? '');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 }
 
@@ -354,11 +468,10 @@ async function processAutoReplyForChat(chatId: string, mode: 'group' | 'p2p', se
   // Append AI note
   reply = reply + '\n\n_（此消息由 AI 助手代为发送）_';
 
-  // Send as user identity
   if (mode === 'group') {
-    //    await sendToGroupChat(chatId, reply);
-    //  } else {
-    //    await sendToP2P(chatId, reply);
+    await sendToGroupChat(chatId, reply);
+  } else {
+    await sendToP2P(chatId, reply);
   }
 
   db.prepare(`UPDATE messages SET auto_replied = 1 WHERE id = ?`).run(pendingMsg.id);
@@ -368,9 +481,9 @@ async function processAutoReplyForChat(chatId: string, mode: 'group' | 'p2p', se
 
 export async function sendManualMessage(channelType: 'person' | 'group', channelId: string, text: string): Promise<void> {
   if (channelType === 'group') {
-    //    await sendToGroupChat(channelId, text);
-    //  } else {
-    //    await sendToP2P(channelId, text);
+    await sendToGroupChat(channelId, text);
+  } else {
+    await sendToP2P(channelId, text);
   }
   console.log(`[autoReply] Manual send OK → ${channelType}:${channelId}`);
 }
@@ -470,9 +583,9 @@ ${lines.join('\n')}`;
 
   try {
     if (channelType === 'group') {
-        //      await sendToGroupChat(channelId, replyWithNote);
+      await sendToGroupChat(channelId, replyWithNote);
     } else {
-      //      await sendToP2P(channelId, replyWithNote);
+      await sendToP2P(channelId, replyWithNote);
     }
     console.log(`[autoReply] Test send OK → ${channelType}:${channelId}`);
     return { ok: true, reply, messageCount: rows.length, sent: true };

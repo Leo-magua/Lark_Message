@@ -158,19 +158,19 @@ app.use('/api/events', eventsRouter);
 app.use('/api/ai', aiRouter);
 app.use('/api/knowledge', knowledgeRouter);
 app.use('/api/templates', templatesRouter);
-// DISABLED for stability:
-// app.post('/api/auto-reply/test', postAutoReplyTest);
-// app.post('/api/auto-reply/send-manual', postSendManual);
-// app.post('/api/auto-reply/trigger', async (_req, res) => {
-//   try {
-//     await checkAndAutoReplyAll();
-//     res.json({ success: true, message: 'Auto-reply check triggered' });
-//   } catch (err) {
-//     console.error('[autoReply-trigger] Error:', err);
-//     res.status(500).json({ ok: false, error: String(err) });
-//   }
-// });
+app.post('/api/auto-reply/test', postAutoReplyTest);
+app.post('/api/auto-reply/send-manual', postSendManual);
 app.use('/api/auto-reply', autoReplyConfigRouter);
+
+app.post('/api/auto-reply/trigger', async (_req, res) => {
+  try {
+    await checkAndAutoReplyAll();
+    res.json({ success: true, message: '自动回复检查完成' });
+  } catch (err) {
+    console.error('[autoReply-trigger] Error:', err);
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});
 
 app.get('/api/monitor/status', (_req, res) => {
   const db = getDb();
@@ -229,10 +229,10 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('  POST /api/ai/analyze/:contactId      <- AI analyze single contact');
   console.log('  POST /api/ai/analyze-all             <- AI analyze all chats');
   console.log('  GET  /api/monitor/status             <- message sync polling status');
-  //   console.log('  POST /api/auto-reply/trigger         <- manual auto-reply trigger');
-  //   console.log('  POST /api/auto-reply/test            <- LLM from local messages; body.send=true -> lark-cli send');
+  console.log('  POST /api/auto-reply/trigger         <- manual auto-reply trigger');
+  console.log('  POST /api/auto-reply/test            <- LLM from local messages; body.send=true -> lark-cli send');
+  console.log('  POST /api/auto-reply/send-manual     <- send raw text as user (expect + lark-cli)');
 
-  // startBackgroundMessageSyncScheduler(); // DISABLED - OOM
-  // startAutoReplyScheduler(); // DISABLED - OOM
-  console.log('[server] All background schedulers DISABLED for stability');
+  startBackgroundMessageSyncScheduler();
+  startAutoReplyScheduler();
 });

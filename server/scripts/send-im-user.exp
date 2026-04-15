@@ -1,0 +1,34 @@
+#!/usr/bin/env expect -f
+# 用法: send-im-user.exp <params.json 路径> <body.json 路径>
+# params.json 示例: {"receive_id_type":"open_id"}
+# body.json 示例: {"receive_id":"ou_xxx","msg_type":"text","content":"{\"text\":\"你好\"}"}
+set timeout 30
+if {$argc < 2} {
+    puts stderr "usage: send-im-user.exp params.json body.json"
+    exit 2
+}
+set pfile [lindex $argv 0]
+set dfile [lindex $argv 1]
+
+set pf [open $pfile r]
+set params [read -nonewline $pf]
+close $pf
+
+set df [open $dfile r]
+set data [read -nonewline $df]
+close $df
+
+# 必须用 list，否则 JSON 里的空格会把参数拆坏
+set argv_list [list lark-cli api POST /open-apis/im/v1/messages --as user --params $params --data $data --format json]
+eval spawn $argv_list
+expect {
+    timeout { puts stderr "expect: TIMEOUT"; exit 2 }
+    eof
+}
+if {[info exists expect_out(buffer)] && $expect_out(buffer) ne ""} {
+    puts stdout $expect_out(buffer)
+}
+set wait_ret [wait]
+set rc [lindex $wait_ret 3]
+if {$rc eq ""} { set rc 0 }
+exit $rc
